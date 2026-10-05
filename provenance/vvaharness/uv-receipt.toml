@@ -1,6 +1,0 @@
-[tool]
-requirements = [{ name = "vvaharness", git = "https://github.com/visa/visa-vulnerability-agentic-harness" }]
-python = "3.13"
-entrypoints = [
-    { name = "vvaharness", install-path = "/home/kali/.local/bin/vvaharness", from = "vvaharness" },
-]

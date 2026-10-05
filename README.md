@@ -1,277 +1,217 @@
-# Praise LLM Assistant
+# PraiseAssistant
 
-Personal backup of Praise's **OMP-based bug bounty and authorized pentesting workflow**. Intended destination: the private repository [sosarollie/praise-LLM-Assistant](https://github.com/sosarollie/praise-LLM-Assistant).
+Evidence-driven orchestration for authorized bug bounty, penetration testing, and source review. PraiseAssistant combines an executable control CLI with an OMP multi-agent crew: explicit work stages, scoped requests, durable case state, shared communication, independent judgment, and reviewed workflow memory.
 
-This is the existing working configuration, not a new autonomous pentest product. It preserves the assistant, role prompts, model router, skills, local analysis tools, and public prior-art corpus. It does not authorize testing any target.
+It does not grant authorization, guarantee vulnerability discovery, train model weights, or replace an operating-system sandbox. Findings are not confirmed merely because a scanner or another agent calls them verified.
 
-## Included and excluded
+## Architecture
 
-| Included | What is preserved |
-|---|---|
-| OMP 18.6.1 | Exact Linux x86_64 executable and both installed native modules |
-| uv 0.12.0 | Exact `uv` and `uvx` executables |
-| Assistant configuration | `config.yml`, `RULES.md`, `crew-router.js`, and ten local pentest role prompts |
-| Skills | Six OMP security skills, 22 shared engineering skills, one workspace operator skill, and their supporting assets |
-| Engagement workspace setup | Root `AGENTS.md` and `.agents` configuration/skill; no target directories |
-| Frame 0.0.1 | Complete local source snapshot at `f477e2836667dbd5f13d94ad66ee5d9d54b74b23`, including tests, benchmarks, license, and scanner extra |
-| Visa vulnerability agentic harness 1.4.0 | Complete local source snapshot at `287e735b182b11ecdf8de7422b4e70d6ad8bc03a`, including rules, validation assets, tests, documentation, license, and notice |
-| HackerOne prior art | Installed public report CSV, top-report lists, and our local `h1_query.py` wrapper |
-| Dependency state | Exact versions of the three installed Frame dependencies and 78 installed Visa harness dependencies; installation receipts and Python version |
+```text
+Authorization + scoped engagement
+              |
+       Plan and discovery
+              |
+   Evidence normalization + gate
+              |
+       Controlled proof
+              |
+ Independent artifact-based judgment
+              |
+            Report
 
-**Explicitly excluded:** Agentic Bug Hunter and CyberStrike. CyberStrike remains a separate local solution. No replacement for Agentic Bug Hunter is implemented here.
+Closed case -> lesson proposal -> paired evaluation
+            -> independent approval -> retrieval or rollback
 
-Also excluded: provider/GitHub credentials, OAuth tokens, authentication databases, private keys, shell history, OMP sessions and caches, target logs, PoCs tied to engagements, captured traffic, evidence, and findings. The publicly disclosed HackerOne corpus is not private engagement evidence.
+A supplied patch takes a separate validation path.
+```
 
-The operator skill is preserved as historical local documentation. It mentions optional platforms, including the excluded products and paths that are not installed on this machine. Those references are not bundled implementations or install instructions executed by this project's importer. ARES, CyberStrikeAI, and Cairn are not included.
+- **One control plane.** PraiseAssistant owns stage transitions, evidence integrity, request policy, and confirmation readiness.
+- **One role catalog.** `praiseassistant/roles.json` defines stage assignments and configured model selectors. Installation generates the OMP catalog and overrides from it.
+- **Explicit scheduling.** Task metadata selects the stage. Words such as “proof,” “duplicate,” or “independent review” inside a task cannot silently select another lane.
+- **Proof before reporting, not before discovery.** A credible source candidate can reach the gate without runtime reproduction. Confirmation requires two distinct clean-state reproductions and a different-family judgment.
+- **Local helpers are optional.** Their outputs enter the same evidence contract; they are neither shipped dependencies nor final authorities.
+
+## Agentic role distribution
+
+The lead is the top-level session. Workers have bounded contracts and do not inherit permission to expand scope.
+
+| Stage / role | Responsibility | Configured primary selector |
+|---|---|---|
+| Lead | Scope, scheduling, coverage, synthesis, report | `openai-codex/gpt-daybreak-blue-latest:high` |
+| `plan` / `pentest-planner` | Ranked hypotheses and falsification tests | `openai-codex/gpt-daybreak-blue-latest:high` |
+| `recon` / `pentest-scout` | Scoped surface mapping and candidates | `opencode-go/deepseek-v4.1-flash:high` |
+| `discover` / `pentest-finder` | Source paths and violated trust/ownership invariants | `opencode-go/deepseek-v4.1-flash:high` |
+| `gate` / `pentest-verifier` | Evidence and reachability sanity gate; no final verdict | `opencode-go/mimo-v2.6-flash:high` |
+| `proof` / `pentest-exploiter` | Minimal controlled reproduction of gated cases | `opencode-go/deepseek-v4-pro:high` |
+| `verdict` / `pentest-skeptic` | Re-derive impact, check duplicates, judge artifacts | `opencode-go/glm-5.3-flash:high` |
+| `patch` / `pentest-tester` | Validate an existing fix and alternate paths | `opencode-go/glm-5.3-flash:high` |
+| `pentest-finder-deep` | Explicitly escalated unresolved source analysis | `opencode-go/deepseek-v4-pro:max` |
+| `pentest-exploiter-deep` | Explicitly escalated complex proof | `opencode-go/deepseek-v4-pro:max` |
+| `pentest-skeptic-deep` | Explicitly escalated disputed judgment | `openai-codex/gpt-daybreak-blue-latest:max` |
+| `security-reviewer` | Bounded defensive source review, not final confirmation | `openai-codex/gpt-daybreak-blue-latest:high` |
+
+Routine judgment and patch lanes have Mimo/Grok alternates; escalated judgment has a Grok alternate. Selection excludes actual recorded producer families rather than assuming the spawning lead produced the finding. DeepSeek Flash/Pro share a family, as do GPT-family selectors. A configured selector is not proof of the model that served a request: each worker records its observed identity.
+
+Model availability and account entitlement are external prerequisites. There is no silent substitution or claim that these assignments have superior measured recall. Generic coding tasks outside an initialized engagement keep the normal OMP workflow.
+
+## Evidence and case states
+
+Each engagement holds its own scope, structured database, human-readable chat, and evidence:
+
+```text
+<engagement>/
+  scope.json
+  state.sqlite3
+  agentschat.md
+  evidence/
+```
+
+Operational files belong outside this repository and are ignored by version control.
+
+The normal path is **candidate -> gated -> reproduced -> confirmed**. Held, rejected, and duplicate cases retain their history. A gate accepts concrete evidence plus a source/sink path or a named violated boundary invariant; it does not demand a finished exploit first.
+
+Final confirmation checks distinct clean-state IDs, reproduction artifacts, current evidence hashes, and a known checker family different from the recorded producers. Missing or changed evidence blocks confirmation. The database is authoritative; prose in chat cannot advance a case by itself. Model identifiers and clean-state descriptions are operational attestations, not cryptographic proof of identity or environment reset.
+
+Patch validation uses four evidence-backed gates: `root_cause`, `instance_coverage`, `no_new_vulnerabilities`, and `security_best_practices`. All must pass for a fixed result. An unevaluated or failed security gate cannot be hidden by a high weighted score.
+
+## Multi-agent communication
+
+`agentschat.md` is the human-readable projection of serialized structured messages. Every message carries the engagement identity, an ordered sequence number, UTC time, role, observed model identity, an evidence reference when relevant, and an **ask** or **close**.
+
+Use the `praiseassistant_chat` tool in an OMP engagement. CLI operators can use:
+
+```sh
+praiseassistant --engagement "$ENGAGEMENT" chat \
+  --role pentest-finder --model "$OBSERVED_MODEL" \
+  --summary 'Candidate has an evidence-backed cross-tenant boundary path.' \
+  --ask 'Gate the candidate before assigning proof work.' \
+  --evidence source-trace.json
+```
+
+Evidence references are relative to that engagement's `evidence/` directory. Keep raw output and real user data out of chat. Workers receive scoped case state, recent communication, and approved lessons as **data**, not authority to override safety rules.
+
+To schedule a worker through OMP's task tool, begin its task with a single metadata line:
+
+```text
+PraiseAssistant-Task: {"stage":"discover","engagement_dir":"/absolute/engagement/path","escalated":false}
+Trace the authorized source path and record the evidence-backed candidate.
+```
+
+Proof, judgment, and patch tasks also carry `candidate_id`. Escalation requires an explicit unresolved reason. The integration validates scheduling through the CLI before choosing the worker and model.
+
+## Self-learning methods
+
+Learning is reviewed workflow memory, not unsupervised self-modification:
+
+1. **Observe:** propose a bounded technical lesson from a closed, evidence-backed case.
+2. **Evaluate:** compare matched baseline/learned cases, including positive and negative controls. Require improvement without newly introduced misses or false positives.
+3. **Promote:** a different-family reviewer explicitly approves a passing evaluation with current artifacts.
+4. **Retrieve:** active lessons become bounded context for future work; the control policy remains authoritative.
+5. **Rollback:** deactivate an unhelpful lesson without deleting its history.
+
+The `learn` CLI and `praiseassistant_learning` tool implement this lifecycle. Paired results are recorded evaluation evidence; the program does not certify an arbitrary evaluator's claims. Helper output, source comments, chat, and lessons never automatically edit scopes, credentials, role definitions, safety instructions, or model weights.
+
+## Installation
+
+### Prerequisites
+
+- Python **3.11 or newer** on Linux.
+- Git and access to this repository.
+- OMP; the integration is exercised against **18.6.1**. Authenticate your own providers separately.
+- Available model selectors matching your catalog, or an explicitly updated catalog.
+
+PraiseAssistant's runtime uses only the Python standard library. Packaging uses setuptools. No target data or provider credentials are distributed.
+
+Install OMP using its [official installation guide](https://github.com/can1357/oh-my-pi#install), for example:
+
+```sh
+bun install -g @oh-my-pi/pi-coding-agent
+```
+
+### Install the program and crew
+
+```sh
+git clone https://github.com/sosarollie/praise-LLM-Assistant.git PraiseAssistant
+cd PraiseAssistant
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+
+python scripts/install.py --dry-run
+python scripts/install.py
+export PATH="$HOME/.local/bin:$PATH"
+praiseassistant --help
+```
+
+The installer deploys owned roles, extension, workflow skills, security rules, and catalog under `~/.omp/agent/`, plus a CLI launcher under `~/.local/bin/`. It preserves unrelated settings and refuses differing owned files unless `--overwrite` is explicit:
+
+```sh
+python scripts/install.py --overwrite
+```
+
+Replacement preserves per-file backups and prints their location. Use another home directory for an isolated installation:
+
+```sh
+python scripts/install.py --home /absolute/test-home
+```
+
+Restore an installation using its printed backup path:
+
+```sh
+python scripts/install.py --restore-backup "$BACKUP"
+```
+
+For an isolated installation, also pass the same `--home /absolute/test-home` when restoring its backup. Rollback refuses destinations changed after installation rather than erasing new user work. Restart OMP or use `/reload`; running workers retain their existing extension/model state. The CLI launcher depends on the installed Python environment, so keep that environment available.
+
+### Start an authorized engagement
+
+Set these values only after the program authorizes the asset and test type:
+
+```sh
+export ENGAGEMENT="$HOME/pentest-workspace/authorized-program"
+praiseassistant init --directory "$ENGAGEMENT" \
+  --program 'Authorized program' \
+  --basis 'Written scope and permitted test types' \
+  --asset 'https://authorized.example/api/' \
+  --mode blackbox --max-requests 50 --interval 1
+
+omp --cwd "$ENGAGEMENT" \
+  --model openai-codex/gpt-daybreak-blue-latest:high
+```
+
+The example hostname is reserved documentation data, not a target to probe. Modes are `blackbox`, `source`, `audit`, `patch`, and `development`. Local source scopes use explicit absolute directories. Only `GET` is allowed by default, with a **zero-request budget** until the operator explicitly sets one. Other methods need an explicit scoped allowance.
+
+The scoped OMP integration exposes state, chat, transitions, learning, and controlled request tools. In `blackbox`, `source`, `audit`, and `patch` modes it blocks shell/eval/browser/direct remote reads and unknown execution bridges. `development` deliberately retains normal execution tools for trusted local implementation work; it is not a restricted target-testing mode. Controlled requests enforce exact origin/path boundaries, allowed methods, shared budgets/throttling, verified TLS, bounded response capture, and no automatic redirects/environment proxies.
+
+Pass owned, explicitly provided credentials by **file reference**, not as model-visible values or command-line JSON: the request tool accepts `headers_file`, and the CLI accepts `--headers-file`. Keep that JSON file in a private, mode-`0600` location within the engagement's allowed local roots, for example `<engagement>/secrets/provided-account.json`. Do not use discovered credentials.
+
+Captured request/response artifacts mask recognized secrets and supplied credential values on a best-effort basis. This is **not data-loss prevention**: inspect evidence before sharing it, minimize capture, and keep raw sensitive data private.
+
+The extension is **not an OS sandbox**: a trusted operator can disable it, and untrusted applications need separate host/container network and filesystem restrictions. Capability restrictions do not prove a payload is non-destructive; the operator still owns authorization and minimal-impact testing.
+
+## Development and verification
+
+```sh
+python -m unittest discover -s tests -p 'test_*.py' -v
+node --test tests/router.test.mjs
+```
+
+Tests cover consumer-visible boundaries: evidence integrity and transitions, scope/HTTP limits, routing and bypass guards, chat concurrency, learning approval/regression handling, and installation preservation/rollback. Live provider tests require your own authentication and are separate from deterministic regression tests.
 
 ## Repository layout
 
 ```text
-home/                         Credential-free mirror of selected /home/kali files
-  .omp/agent/                 OMP configuration, rules, roles, router, security skills
-  .agents/                    Shared engineering skills and their provenance lock
-  pentest-workspace/          Workspace instructions and operator skill
-sources/
-  frame/                      Preserved Frame source and upstream assets
-  vvaharness/                 Preserved Visa harness source and upstream assets
-requirements/
-  frame.txt                   Installed dependency pins, excluding the root package
-  vvaharness.txt              Installed dependency pins, excluding the root package
-provenance/                   Original uv receipts and Python environment metadata
-runtime/linux-x64/            Compressed exact-runtime archive split into 48 MiB parts
-snapshot.json                 SHA-256 hashes, file modes, restore destinations, versions
-scripts/restore.py            Verify and restore the snapshot
+praiseassistant/             CLI, state/control, learning, authoritative role catalog
+home/.omp/agent/agents/      Bounded role contracts
+home/.omp/agent/extensions/  OMP scheduling and capability integration
+home/.omp/agent/skills/      Public workflow, communication, learning, patch guides
+home/.omp/agent/RULES.md     Stack safety and evidence policy
+scripts/install.py          Conflict-aware installation and rollback
+tests/                      Deterministic behavioral regressions
 ```
 
-The runtime is split because the original executables/native modules exceed GitHub's per-file limits. These are real binary contents, not Git LFS pointers. Keep all six parts together. The compressed runtime occupies approximately 271 MiB; restore also needs temporary space for decompression and Python dependencies.
+Local dependencies, private evaluations, legacy archives, credentials, operational databases, chat, and engagement evidence are intentionally excluded. The repository contains the stack implementation and reproducible installation instructions, not a workstation image.
 
-## How the crew works
+## Reporting discipline
 
-```text
-Scoped engagement -> planning + recon/source discovery
-                  -> cheap candidate gate
-                  -> minimal proof (or gated chain escalation)
-                  -> different-family skeptical verdict
-                  -> report
-
-Patch supplied -> adversarial patch validation -> acceptance decision
-```
-
-Candidates are not confirmed findings. A dropped candidate does not enter the proof lane. Deep source analysis and complex proof work receive a specific unresolved gap, not an unrestricted repeat of the original sweep.
-
-`home/.omp/agent/extensions/crew-router.js` selects a crew role from the task description and pins its model before spawning. This pinning **takes precedence over** `task.agentModelOverrides` in `config.yml`. The snapshot preserves both mappings. Restart OMP or use `/reload` after changing the router; already-running children retain their current models.
-
-### Pentesting roles
-
-Models in this table use the `opencode-go/` provider unless explicitly qualified otherwise. Reasoning levels are part of the selectors, not claims about the models actually serving future requests.
-
-The pentest lead is the top-level OMP session, not a child agent: select Daybreak Blue explicitly at launch. The router pins `pentest-planner` and `security-reviewer` to Daybreak Blue; `pentest-skeptic-deep` uses Daybreak Blue subject to the independent-checker guard described below.
-
-| Role | Responsibility | Primary model / reasoning |
-|---|---|---|
-| Pentest lead (top-level session) | Scope, coordination, prioritization, and handoffs; explicitly launched with Daybreak Blue | `openai-codex/gpt-daybreak-blue-latest:high` |
-| `security-reviewer` | Bounded defensive source review; not a final independent verdict | `openai-codex/gpt-daybreak-blue-latest:high` |
-| `pentest-scout` | Broad scoped reconnaissance and candidate generation; never a verdict | `deepseek-v4.1-flash:high` |
-| `pentest-planner` | Ranked hypotheses, coverage, and engagement plans | `openai-codex/gpt-daybreak-blue-latest:high` |
-| `pentest-finder` | Primary source discovery and input-to-sink traces | `deepseek-v4.1-flash:high` |
-| `pentest-finder-deep` | Bounded unresolved cross-file analysis after the ordinary pass | `deepseek-v4-pro:max` |
-| `pentest-verifier` | Mechanical pass/drop gate before costly proof work | `mimo-v2.6-flash:high` |
-| `pentest-exploiter` | Minimal working proof for a gated, reachable candidate | `deepseek-v4-pro:high` |
-| `pentest-exploiter-deep` | Gated multi-step proofs and attack chains | `deepseek-v4-pro:max` |
-| `pentest-skeptic` | Routine evidence-backed finding verdict | `glm-5.3-flash:high` |
-| `pentest-skeptic-deep` | Disputed severity, chain adjudication, or final second opinion; different-family fallback when required | `openai-codex/gpt-daybreak-blue-latest:max` |
-| `pentest-tester` | Independent production exploitability and patch validation | `glm-5.3-flash:high` |
-
-Supporting mappings: generic `scout` uses `muse-spark-1.3-contributor:low`; `sonic` uses `space-bunny-free:low`; generic `task` is pinned to `space-bunny-free:high`.
-
-The ordinary skeptic and tester can select Mimo Flash or Grok 4.7 instead of GLM Flash when needed for parent-family separation. The deep skeptic's primary is Daybreak Blue at max reasoning, with Grok 4.7 at high as its alternate. A GPT-family parent (including Daybreak Blue or Sol) causes the router to select Grok rather than another GPT-family checker. The router blocks an independent checker if no different-family selector is available. Checkers must also compare their **observed** model against the actual finding producer recorded in the engagement log; parent-family filtering alone is not enough. Daybreak Blue and Sol are one GPT family, just as DeepSeek Flash and Pro are one DeepSeek family, so neither pair supplies independent validation of its own family.
-
-### General model configuration versus the pentest lead
-
-The saved general OMP roles are:
-
-- `default`: `openai-codex/gpt-6.1-sol:max`
-- `smol`: `opencode-go/longcat-2.5-preview-free:high`
-- `plan`: `opencode-go/deepseek-v4.1-flash:high`
-- `slow`: `opencode-go/deepseek-v4-pro:max`
-
-These are preserved exactly; the backup does not silently change defaults. No explicit Sol selector is assigned to a pentest crew role. For the documented pentesting lead workflow, launch Daybreak Blue explicitly as shown below. Model availability, account entitlement, and upstream aliases can change independently of this snapshot.
-
-`providers.maxInFlightRequests.openai-codex: 3` is a shared provider request cap, not a three-agent limit and not extra subscription capacity. The rules require bounded batches, `omp usage --redact` before/after a batch, and an operating target of at least 20% remaining in active quota windows. None of this permits more target traffic or broader scope.
-
-## Skills
-
-Skills are on-demand instructions and supporting assets. Loading one does not mean a scanner runs automatically, an account is authenticated, or a finding is proven.
-
-### Security workflow skills
-
-Location: `home/.omp/agent/skills/`.
-
-| Skill | Purpose |
-|---|---|
-| `bounty-report` | Authorization/scope gate, non-destructive testing, evidence, severity, and report workflow |
-| `agents-chat` | Append-only per-engagement coordination and evidence-index protocol |
-| `frame-scan` | Use Frame's symbolic reasoning, local SAST, taint/entailment checks, and bounded proof paths |
-| `vvaharness-scan` | Operate Visa's staged repository analysis, remediation, and validation pipeline |
-| `hackerone-prior-art` | Query disclosed reports for duplicate/prior-art and payout calibration; estimates are not guarantees |
-| `vva-validation-scoring` | Four-gate adversarial patch validation and scoring |
-
-The query wrapper and corpus are included, not merely linked. Frame/Visa rules, prompts, package data, and remediation policies are preserved with their source snapshots.
-
-### Engineering and communication skills
-
-Location: `home/.agents/skills/`.
-
-| Skill | Purpose |
-|---|---|
-| `caveman` | Terse, fact-focused responses |
-| `caveman-commit` | Intent-focused Conventional Commits messages |
-| `caveman-compress` | Compress memory and instruction files |
-| `caveman-discover` | Identify LLM workflows and spending categories |
-| `caveman-evidence-review` | Inspect cost, traces, latency, routing, and errors |
-| `caveman-explore` | Read-only code localization |
-| `caveman-help` | Explain Caveman modes and commands |
-| `caveman-learn` | Identify and reduce token-cost sinks |
-| `caveman-manage` | Controlled experiment approval, promotion, and rollback |
-| `caveman-optimize` | Evaluate approved optimizations against baselines |
-| `caveman-review` | Concise diff/PR review |
-| `caveman-setup` | Configure spend observability |
-| `caveman-stats` | Inspect current-session usage and cache behavior |
-| `cavecrew` | Delegation guidance for code location, implementation, and review |
-| `find-skills` | Find and install relevant skills |
-| `investigate-first` | Diagnose from evidence before editing |
-| `lean-build` | Keep new behavior narrow and complete |
-| `migration` | Reversible configuration/data/API transitions |
-| `safe-refactor` | Preserve behavior during restructuring |
-| `surgical-patch` | Targeted fixes with regression proof |
-| `verify-and-stop` | Focused acceptance checks without scope growth |
-| `simplified-technical-english` | Controlled, plain technical documentation |
-
-The workspace's `offsec-assistant` skill is an operator/environment reference originally written for Gemini. It is preserved under `home/pentest-workspace/.agents/skills/`, including its historical tool references. Current standing authorization and safety rules take precedence over permissive assumptions or legacy examples in that file.
-
-## Import / restore
-
-### Prerequisites
-
-- Linux x86_64 with glibc, as on the original Kali installation. The included runtime is not a macOS/Windows/ARM build.
-- Git and Python **3.11 or newer** to run the importer.
-- Several GiB of free space for the repository, runtime staging, and dependencies.
-- GitHub access to this private repository. `gh` is convenient but not part of the assistant runtime backup.
-- Internet access for pinned Python dependencies and, if missing, CPython 3.13.12. The importer restores the bundled OMP/uv binaries without downloading current replacements.
-
-### 1. Clone and verify
-
-```bash
-gh auth login --hostname github.com --git-protocol https --web
-gh repo view sosarollie/praise-LLM-Assistant --json visibility,viewerPermission
-# Require visibility PRIVATE before uploading future backups.
-gh repo clone sosarollie/praise-LLM-Assistant
-cd praise-LLM-Assistant
-python3 scripts/restore.py --verify-only
-```
-
-Alternatively, clone with Git using your own configured HTTPS credential helper or SSH authentication. Do not put a token in a clone URL.
-
-Verification checks SHA-256 for every captured file, all archive parts, and each unpacked runtime member. It detects corruption; it is not a digital signature or a substitute for trusting the repository owner.
-
-### 2. Restore the assistant and tools
-
-For the original account/home layout:
-
-```bash
-python3 scripts/restore.py --home /home/kali
-export PATH="$HOME/.local/bin:$PATH"
-omp --version
-frame --help
-vvaharness --help
-```
-
-This restores the saved files/modes and exact binaries. It installs Frame with its `[scan]` extra and Visa's harness from the **included local sources**, using the captured dependency versions and CPython 3.13.12. Sources are placed under `~/.local/share/praise-LLM-Assistant/sources/`; uv creates isolated tool environments and launchers under `~/.local/share/uv/tools/` and `~/.local/bin/`.
-
-For another Linux account, use:
-
-```bash
-python3 scripts/restore.py --home "$HOME"
-```
-
-The original snapshots in the repository remain byte-identical. During restoration to a different home, occurrences of `/home/kali` in assistant configuration/instructions are relocated to the requested home. Tool source files are not rewritten. For byte-identical deployed assistant files, use the original `/home/kali` layout.
-
-A clean home is the closest reproduction. The importer does not delete unrelated files or prune extra existing agents/skills. Differing existing files cause a preflight refusal before snapshot files are replaced. To explicitly replace them:
-
-```bash
-python3 scripts/restore.py --home "$HOME" --overwrite
-```
-
-Changed existing files are saved first under `~/.local/state/praise-LLM-Assistant/restore-backups/<UTC timestamp>/` with their original relative paths. Restore an individual saved file to its corresponding home path to undo that replacement. New files and uv tool installs are not automatically rolled back. `--overwrite` also authorizes uv to replace an existing installation of the two tools. Existing provider credentials are neither imported nor overwritten.
-
-Offline/configuration-only restoration:
-
-```bash
-python3 scripts/restore.py --home "$HOME" --skip-tools
-```
-
-This is intentionally not a complete Python-tool installation. Rerun without `--skip-tools` when package access is available. Installation errors are reported rather than treated as a successful import.
-
-### 3. Authenticate separately
-
-```bash
-omp login openai-codex
-omp login opencode-go
-omp usage --redact
-```
-
-Use your own Codex/OpenCode Go account entitlements. Provider credentials and OAuth state were intentionally not committed. An old chat/session cannot be resumed from this repository.
-
-Frame/Visa's external LLM-assisted modes have their own backend configuration requirements; see the preserved `frame-scan` and `vvaharness-scan` skills and upstream tool documentation. OMP login is not an automatic credential bridge to those tools. Keep any API keys in your local environment/credential store, never this repository.
-
-### 4. Launch a real engagement
-
-```bash
-# Only after identifying a real program, its scope, and authorized accounts:
-mkdir -p "$HOME/pentest-workspace/REAL-ENGAGEMENT/evidence"
-omp --cwd "$HOME/pentest-workspace/REAL-ENGAGEMENT" \
-  --model openai-codex/gpt-daybreak-blue-latest --thinking high
-```
-
-Replace `REAL-ENGAGEMENT` with the actual program/scope boundary; do not initialize placeholder or global logs. Read the workspace instructions and `agents-chat` skill, then record the program, assets, and in-scope basis before active testing. Each child receives the absolute engagement directory, log path, evidence path, and authorized scope. Use observed model identifiers in the log; never assume a requested selector proves the producer's identity.
-
-No denial-of-service, persistence, bulk data access, credential reuse, or out-of-scope probing. Minimal proofs must reproduce twice from a clean state before reporting. The README's setup commands do not change these boundaries.
-
-### 5. Check the imported surface
-
-```bash
-omp --version
-python3 "$HOME/.omp/agent/skills/hackerone-prior-art/h1_query.py" stats --type IDOR
-frame --help
-vvaharness --help
-```
-
-These are local checks, not target scans. Confirm OMP reports version 18.6.1, the public corpus loads, and both tool CLIs start. The ten custom role prompt files are restored under `~/.omp/agent/agents/`; OMP discovers them when starting the task subsystem. A real provider-backed engagement still requires fresh authentication and scope; no live pentest is part of the backup verification.
-
-### Verification performed for this snapshot
-
-- Complete import into a clean, isolated home; Frame and Visa's harness both installed and their actual CLI entrypoints ran.
-- All three Frame and 78 Visa harness dependency versions matched the original environments.
-- Frame's documented separation-logic example returned `VALID`; the local corpus loaded 10,212 disclosed reports.
-- Hash verification covered 1,648 captured files, six archive parts, and five exact runtime files. Actual local OMP credential values were absent from the captured files and runtime bytes.
-- Existing-file conflicts refused restoration before copying any runtime files; explicit overwrite preserved the prior file and relocated paths; a repeated import changed zero files.
-- The restored router's proof lane and different-family checker selection were exercised locally. No provider-backed model turn or live target test was performed.
-- Gitleaks 8.30.1 raised 29 matches in synthetic test fixtures. All 14 implicated files were SHA-256-identical to their exact public upstream commits; the fixtures were retained unchanged, not hidden with scanner exceptions.
-
-A credential-free OMP installation correctly refuses model-backed startup until login or API-key configuration is supplied. The importer does not fake or restore authentication.
-
-
-## Fidelity limits
-
-This is an application/workflow snapshot, **not a disk image**. Assistant bytes, source snapshots, runtime bytes, modes, versions, and dependency pins are preserved. It does not reproduce the OS/kernel, every system pentest binary, shell customization, browser profile, provider accounts, model availability, local engagement records, or existing sessions. Python dependencies are version-pinned rather than vendored as an offline wheelhouse. The importer relocates source installation paths and regenerates uv environments/entrypoints instead of copying virtualenvs tied to the old machine.
-
-## Upstream attribution and licenses
-
-- [OMP / oh-my-pi](https://github.com/can1357/oh-my-pi): assistant runtime; [official site](https://omp.sh/).
-- [uv](https://github.com/astral-sh/uv): Python tool installer/runtime executables.
-- [Frame](https://github.com/lambdasec/frame): Apache-2.0; preserved `sources/frame/LICENSE`.
-- [Visa vulnerability agentic harness](https://github.com/visa/visa-vulnerability-agentic-harness): Apache-2.0; preserved `LICENSE`, `NOTICE`, and third-party notices in its source directory.
-- [InsiderPhD/hackerone-reports](https://github.com/InsiderPhD/hackerone-reports): publicly disclosed report metadata snapshot; individual reports retain their authorship and platform terms.
-- [Caveman](https://github.com/JuliusBrussee/caveman) and the sources recorded in `home/.agents/.skill-lock.json`: installed engineering skills.
-
-Third-party source/license notices are retained; this personal backup does not relicense them. Keep the repository private and do not enable Pages or public artifact publication.
+Only independently confirmed cases are submission-ready. Include exact preconditions, clean reproduction steps, minimal redacted evidence, demonstrated impact, program-appropriate severity, and the relevant remediation invariant. Static-only conclusions must state their limitations. Keep duplicate causes together, respect every hop's scope, and never inflate severity to compensate for incomplete proof.

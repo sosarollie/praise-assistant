@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "lead_model": "openai-codex/gpt-daybreak-blue-latest:high",
+  "stages": {
+    "plan": "pentest-planner", "recon": "pentest-scout", "discover": "pentest-finder",
+    "gate": "pentest-verifier", "proof": "pentest-exploiter", "verdict": "pentest-skeptic", "patch": "pentest-tester"
+  },
+  "escalations": {
+    "discover": "pentest-finder-deep", "proof": "pentest-exploiter-deep", "verdict": "pentest-skeptic-deep"
+  },
+  "roles": {
+    "pentest-scout": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
+    "pentest-planner": {"models": ["openai-codex/gpt-daybreak-blue-latest:high"]},
+    "pentest-finder": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
+    "pentest-finder-deep": {"models": ["opencode-go/deepseek-v4-pro:max"]},
+    "pentest-verifier": {"models": ["opencode-go/mimo-v2.6-flash:high"]},
+    "pentest-exploiter": {"models": ["opencode-go/deepseek-v4-pro:high"]},
+    "pentest-exploiter-deep": {"models": ["opencode-go/deepseek-v4-pro:max"]},
+    "pentest-skeptic": {"models": ["opencode-go/glm-5.3-flash:high", "opencode-go/mimo-v2.6-flash:high", "opencode-go/grok-4.7:high"], "independent": true},
+    "pentest-skeptic-deep": {"models": ["openai-codex/gpt-daybreak-blue-latest:max", "opencode-go/grok-4.7:high"], "independent": true},
+    "pentest-tester": {"models": ["opencode-go/glm-5.3-flash:high", "opencode-go/mimo-v2.6-flash:high", "opencode-go/grok-4.7:high"], "independent": true},
+    "security-reviewer": {"models": ["openai-codex/gpt-daybreak-blue-latest:high"]}
+  }
+}

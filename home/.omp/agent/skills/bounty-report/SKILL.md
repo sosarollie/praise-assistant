@@ -5,10 +5,10 @@ description: End-to-end bug bounty and authorized penetration testing workflow -
 
 # Bug bounty hunting and reporting workflow
 
-Covers authorized testing and report production. Companion skills:
-`frame-scan` (source-level SAST), `vvaharness-scan` (repo-wide agentic audit),
-`hackerone-prior-art` (payout/precedent calibration), `vva-validation-scoring`
-(adversarial validation of a proposed fix).
+Covers authorized testing and report production. Orchestration companions:
+`praiseassistant-workflow` (the staged multi-model pipeline), `agents-chat`
+(cross-role coordination), `praiseassistant-learning` (evidence-backed workflow
+learning), and `patch-validation` (adversarial validation of a proposed fix).
 
 ## 0. Authorization is a gate, not a formality
 
@@ -64,10 +64,6 @@ Work a class at a time, with a written hypothesis and a falsification test.
 | Race conditions | Prove a real double-spend or duplicate-benefit effect, not a 500. |
 | Business logic | Quantify the abuse: credits, refunds, coupons, invites, rate limits, referral chains. |
 
-Static side-quest: if source or a mobile APK is in scope, run `frame scan` and
-`vvaharness-scan` (see those skills) — a proven taint path or an agentic authz
-finding is a head start over blind probing.
-
 ## 3. Evidence capture as you go
 
 For every candidate, keep a reproducible trail before you write anything:
@@ -79,7 +75,11 @@ For every candidate, keep a reproducible trail before you write anything:
 - timestamps in UTC,
 - how to reproduce from a clean session, and how to clean up after.
 
-If you cannot reproduce it twice from a clean state, it is not reportable yet.
+The `praiseassistant-workflow` skill tracks this evidence through a candidate
+lifecycle: a candidate with concrete evidence and a source/sink reference (or a
+named boundary invariant) is gated before a proof of concept is built, and a
+final confirmation requires two distinct clean-state reproductions with evidence
+artifacts.
 
 ## 4. Severity
 
@@ -100,9 +100,6 @@ Adjust honestly: report chains at the chain's impact, not the last link's. Avoid
 inflating — a report whose severity is inflated reads as noise and costs the
 program's trust in the whole submission.
 
-Calibrate the payout expectation with the `hackerone-prior-art` skill rather than
-the program's advertised maximum.
-
 ## 5. Report structure
 
 HackerOne-style, and the same skeleton works for a pentest deliverable:
@@ -120,7 +117,7 @@ HackerOne-style, and the same skeleton works for a pentest deliverable:
 9. **Remediation** — the specific fix, not "sanitize input". Name the code path
    and the invariant to enforce (e.g. scope every query by the authenticated
    principal's tenant id).
-10. **References** — CWE, OWASP, prior art for the class (from the corpus skill).
+10. **References** — CWE, OWASP, prior art for the class.
 
 Attach all impact in **one** report. Splitting a chain into several reports
 reads as padding and usually gets the extras closed as duplicates.
@@ -128,12 +125,12 @@ reads as padding and usually gets the extras closed as duplicates.
 ## 6. Before you submit
 
 - [ ] In scope, authorized, rate limits respected
-- [ ] Reproduced from a clean state, twice
+- [ ] Reproduced from a clean state, twice, with distinct clean-state evidence
 - [ ] Impact proven with the minimum artifact; no unnecessary user data included
 - [ ] Title carries the class keyword and the concrete impact
 - [ ] Severity justified by a CVSS vector, not vibes
 - [ ] Remediation is specific and actionable
-- [ ] Duplicates disclosed — check the program's existing reports and the corpus
+- [ ] Duplicates disclosed — check the program's existing reports
 - [ ] Nothing destructive done, nothing left behind on the target
 
 ## Anti-patterns that cost real money

@@ -1,15 +1,13 @@
-# Credentials and operational state never belong in this backup.
+# Credentials and operational data stay outside the published program.
 .env
-.env.local
+.env.*
 *.pem
 *.key
 *.p12
 *.pfx
 *.ovpn
 *.sqlite*
-*.db
-*.db-wal
-*.db-shm
+*.db*
 auth.json
 oauth_creds.json
 hosts.yml
@@ -22,17 +20,32 @@ __pycache__/
 .venv/
 venv/
 node_modules/
+*.egg-info/
+build/
+dist/
 sessions/
 terminal-sessions/
 *.log
 *.pcap
 *.pcapng
-# Engagement evidence and the explicitly excluded standalone products.
 /evidence/
 /engagements/
+/local-tools/
+/private/
 **/agentschat.md
-**/Agentic-Bug-Hunter/
-**/cyberstrike/
-**/CyberStrikeAI/
-# Restore/download scratch state is kept outside the repository.
-.restore-state/
+**/scope.json
+# Legacy snapshots and local dependencies are not distribution assets.
+/sources/
+/requirements/
+/provenance/
+/runtime/
+/snapshot.json
+/home/.agents/
+/home/pentest-workspace/
+/home/.omp/agent/config.yml
+/home/.omp/agent/skills/*
+!/home/.omp/agent/skills/agents-chat/
+!/home/.omp/agent/skills/bounty-report/
+!/home/.omp/agent/skills/praiseassistant-workflow/
+!/home/.omp/agent/skills/praiseassistant-learning/
+!/home/.omp/agent/skills/patch-validation/
