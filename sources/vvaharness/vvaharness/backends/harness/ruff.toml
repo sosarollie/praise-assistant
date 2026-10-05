@@ -1,0 +1,65 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The harness family's justified exceptions to the standard.
+#
+# `extend` rather than a copy of the whole standard: ../ruff.toml already inherits it from
+# vvaharness/validation/ruff.toml, so line-length, select, mccabe and the rest are defined once
+# for the whole backends tree instead of three times.
+extend = "../ruff.toml"
+
+[lint.per-file-ignores]
+# Every glob is `**/`-prefixed on purpose. Ruff anchors a relative glob to the CONFIG's directory
+# when it discovers the config, but to the CWD when invoked as `--config <path>`. Without the
+# prefix these ignores evaporate under the second form -- `ruff check --config
+# vvaharness/backends/harness/ruff.toml vvaharness/backends/harness/` from the repo root reported
+# all 22 findings the entries below exist to suppress, which is exactly how a lint gate would
+# call it.
+"**/__init__.py" = ["D104", "F401"]  # re-export modules
+
+# The translation layers map N SDK/LangGraph message and option shapes onto one harness
+# contract, so branch count IS the shape count. Splitting them scatters a single mapping
+# across helpers that only ever have one caller, which reads worse and hides the total
+# set. Complexity is bounded by the SDK surface, not by accreted logic.
+# _extract_sdk_persona_reports also trips PLR0915: it scrapes JSON out of the CLI's
+# subagent transcripts, which is a flat sequence of parse steps, not nested logic.
+"**/claude/client.py" = ["C901", "PLR0912", "PLR0915"]
+"**/claude/options.py" = ["PLR0912"]
+"**/deepagents/client.py" = ["C901", "PLR0912"]
+"**/deepagents/translate.py" = [
+  "C901", "PLR0912",
+  "ARG001",  # translate_final_state's `oneshot` is passed by name from client.py
+]
+"**/deepagents/options/model_building.py" = [
+  "PLR0911",  # _ssl_context: 4 returns — three distinct stay-stock None exits (no httpx,
+              # no TLS material configured, unloadable chain was the only material) + the context
+  "PLR0912",  # tls_carriers_for and build_model: one branch per transport knob resolved
+              # (CA bundle, client chain, verify tri-state, no_proxy, socket options). Same
+              # shape as the sibling entries above — branch count IS the knob count, and it
+              # is bounded by the transport surface, not by accreted logic. Splitting would
+              # scatter one config-to-carrier mapping across single-caller helpers and hide
+              # which knobs are handled, which is the property reviewers check here.
+]
+"**/deepagents/options/graph_builder.py" = [
+  "C901",     # _create_agent: complexity IS the optional-kwarg count it forwards
+  "PLR0912",  # _create_agent: one branch per optional create_deep_agent kwarg it forwards
+  "PLR0913",  # _create_agent: 13 args, each a create_deep_agent kwarg it forwards
+  "PLR0915",  # _create_agent: graph option assembly is centralized here, one statement
+              # per optional kwarg it resolves before forwarding — same shape as the
+              # branch/arg counts above, not accreted logic.
+]
+# build_tools deliberately returns [] -- the native middleware already provides these
+# tools. Its parameters are the ToolBuilder contract that validation's wrapper calls by
+# keyword, so they cannot be renamed to _-prefixed throwaways.
+"**/deepagents/tools.py" = ["ARG001"]

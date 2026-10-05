@@ -1,0 +1,209 @@
+{
+  "$defs": {
+    "EvidenceAnchor": {
+      "description": "A file/line/snippet reference pinning a gate outcome to real source.",
+      "properties": {
+        "file": {
+          "default": "",
+          "description": "repo-relative path",
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "1-indexed line, when anchored",
+          "title": "Line"
+        },
+        "snippet": {
+          "default": "",
+          "description": "the cited source text",
+          "title": "Snippet",
+          "type": "string"
+        }
+      },
+      "title": "EvidenceAnchor",
+      "type": "object"
+    },
+    "GateEntry": {
+      "description": "One gate verdict for a single finding.",
+      "properties": {
+        "details": {
+          "default": "",
+          "title": "Details",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceAnchor"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "gate_name": {
+          "title": "Gate Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "partial",
+            "fail",
+            "skip"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate_name",
+        "status"
+      ],
+      "title": "GateEntry",
+      "type": "object"
+    },
+    "OutputFinding": {
+      "description": "Single finding block emitted by the validation agent.",
+      "properties": {
+        "affected_files": {
+          "title": "Affected Files",
+          "type": "string"
+        },
+        "conditions_for_full_fix": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Conditions For Full Fix",
+          "type": "array"
+        },
+        "files_needing_fixes": {
+          "default": "",
+          "title": "Files Needing Fixes",
+          "type": "string"
+        },
+        "finding_description": {
+          "title": "Finding Description",
+          "type": "string"
+        },
+        "finding_title": {
+          "title": "Finding Title",
+          "type": "string"
+        },
+        "fix_status": {
+          "default": "UNVERIFIABLE",
+          "title": "Fix Status",
+          "type": "string"
+        },
+        "gate_scores": {
+          "additionalProperties": true,
+          "title": "Gate Scores",
+          "type": "object"
+        },
+        "justification": {
+          "default": "",
+          "title": "Justification",
+          "type": "string"
+        },
+        "merge_readiness": {
+          "default": "Not Ready",
+          "title": "Merge Readiness",
+          "type": "string"
+        },
+        "raw_score": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Raw Score",
+          "type": "number"
+        },
+        "recommendations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recommendations",
+          "type": "array"
+        },
+        "severity": {
+          "default": "Medium",
+          "title": "Severity",
+          "type": "string"
+        },
+        "tracking_id": {
+          "title": "Tracking Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tracking_id",
+        "finding_title",
+        "finding_description",
+        "affected_files"
+      ],
+      "title": "OutputFinding",
+      "type": "object"
+    },
+    "SynthesizedGatesEntry": {
+      "description": "Synthesized gates for one finding, keyed by tracking_id.",
+      "properties": {
+        "gates": {
+          "items": {
+            "$ref": "#/$defs/GateEntry"
+          },
+          "title": "Gates",
+          "type": "array"
+        },
+        "tracking_id": {
+          "title": "Tracking Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tracking_id",
+        "gates"
+      ],
+      "title": "SynthesizedGatesEntry",
+      "type": "object"
+    }
+  },
+  "description": "Top-level structured response from any validation Harness backend.\n\nThe host (not the agent) writes ``validation_report.json`` and\n``synthesized_gates.json`` from this payload.",
+  "properties": {
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/OutputFinding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "synthesized_gates": {
+      "items": {
+        "$ref": "#/$defs/SynthesizedGatesEntry"
+      },
+      "title": "Synthesized Gates",
+      "type": "array"
+    },
+    "target_jira_status": {
+      "title": "Target Jira Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "target_jira_status",
+    "findings",
+    "synthesized_gates"
+  ],
+  "title": "ValidationOutput",
+  "type": "object"
+}
+

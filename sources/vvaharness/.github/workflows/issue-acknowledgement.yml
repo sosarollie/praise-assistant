@@ -1,0 +1,56 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Public issue acknowledgement
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+concurrency:
+  group: issue-intake-ack-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  acknowledge:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      SECURITY_POLICY_URL: ${{ github.server_url }}/${{ github.repository }}/security/policy
+      VVAH_TEAM_NAME: "VVAH Team"
+      VVAH_TEAM_EMAIL: "vvaharness@visa.com"
+    steps:
+      - name: Acknowledge issue
+        shell: bash
+        run: |
+          {
+            printf '%s\n\n' "Thank you for submitting this issue. We've confirmed it has been received and logged for review."
+            printf '%s\n\n' "Please note this acknowledgment reflects receipt only, it does not indicate acceptance, confirm a defect, or commit us to a specific remedy or timeline. We'll follow up if additional information is needed."
+            printf '%s\n\n' 'We appreciate you taking time to help improve the project.'
+            printf 'Feel free to reach out to us at [%s](mailto:%s) for feedback on the issue submission process or any other questions.\n\n' "${VVAH_TEAM_EMAIL}" "${VVAH_TEAM_EMAIL}"
+            printf '%s\n' "${VVAH_TEAM_NAME}"
+          } > "${RUNNER_TEMP}/acknowledgement.md"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GH_REPO}/issues/${ISSUE_NUMBER}/comments" \
+            --raw-field "body=$(cat "${RUNNER_TEMP}/acknowledgement.md")"

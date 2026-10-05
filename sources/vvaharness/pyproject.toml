@@ -1,0 +1,126 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["setuptools>=84.0.0,<85"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vvaharness"
+version = "1.4.0"
+description = "Visa's open-source harness for autonomous vulnerability discovery and validation, using large language models"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2.13.5,<3",
+    "pydantic-settings>=2.15.0,<3",
+    "PyYAML>=6.0.3,<7",
+    # anthropic 1.0 removed temperature/top_p/top_k from the Messages methods,
+    # so passing one is a client-side TypeError that backends/llm/sdk.py's
+    # 400-handler cannot catch. langchain-anthropic used to cap this for us
+    # transitively; 1.7.0 relaxed its bound to <2.0.0, so a fresh resolve can
+    # now select the breaking major. Lift this cap only together with a backend
+    # change that stops sending temperature as a top-level kwarg.
+    "anthropic>=0.125.0,<1.0",
+    "openai>=3.7.0,<4",
+    "httpx>=0.28.1,<1",
+    # backends/llm/openai.py imports httpx2 directly; openai >=3 is backed by it.
+    "httpx2>=2.12.0,<3",
+    "urllib3>=2.7.0,<3",
+    "python-dotenv>=1.2.3,<2",
+    "typing_extensions>=4.16.0,<5",
+    "claude-agent-sdk>=0.2.151,<0.3",
+    "tree-sitter>=0.26.0,<0.27",
+    "tree-sitter-language-pack>=1.16.1,<2",
+    # Keep the marker aligned with DeepAgents' own floor. The project-level
+    # requires-python >=3.11 means supported installs always include it.
+    "deepagents>=0.7.13,<0.8; python_version >= '3.11'",
+    "langchain>=1.3.18,<2",
+    "langchain-anthropic>=1.7.0,<2",
+    "langchain-openai>=1.6.0,<2",
+    "langgraph>=1.2.11,<2",
+]
+
+[project.optional-dependencies]
+# Dev tooling: `pip install '.[dev]'` to run the test suite + the static
+# undefined-name gate (pyflakes).
+dev = ["pytest>=9.1.1,<10", "pyflakes>=3.4.0,<4", "ruff>=0.16.5,<0.17", "pyright>=1.1.411,<2"]
+
+[project.scripts]
+vvaharness = "vvaharness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vvaharness*"]
+
+[tool.setuptools.package-data]
+vvaharness = [
+    "py.typed",
+    "config/profiles/*.yaml",
+    "exploit_verification/payloads/templates/*.yaml",
+    # Explicit allowlist — do NOT use a broad rules/*.yaml glob. Org-specific
+    # overlays (e.g. *.kb.yaml harvested from internal reviews) must live
+    # OUTSIDE the package and be referenced by path, never packaged. See
+    # vvaharness/rules/__init__.py and rules/README.md.
+    "rules/sources.generated.yaml",
+    "rules/sinks.generated.yaml",
+    "rules/generic.kb.yaml",
+    "rules/README.md",
+    "validation/hints/*.yaml",
+    "validation/prompts/*.md",
+    "validation/subagents/*.md",
+    "validation/claude_config/**/*",
+]
+
+# These files intentionally remain canonical under the repository-level
+# ``inputs/`` directory. Install them into a stable shared-data location so a
+# non-editable wheel does not lose the fail-closed remediation rules.
+[tool.setuptools.data-files]
+"share/vvaharness/rules" = [
+    "inputs/remediation_policy.yaml",
+    "inputs/remediation_playbook.yaml",
+]
+
+# vvaharness ships production modules named test_*.py (fact tools the agent calls);
+# without this pytest scrapes them from the repo root and errors on them.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Lint gate: per-package ``ruff.toml`` files, one per package held to the standard
+# (``vvaharness/validation/ruff.toml`` was the first, ``vvaharness/backends/harness/``
+# the second). Deliberately NOT configured here: a root ``[tool.ruff]`` would become the
+# nearest config for every legacy package too, and those report ~219 findings that no
+# single change should be sweeping.
+
+# Typing gate. Scoped to the packages held to this standard; the rest of the
+# tree predates it. venvPath/venv are load-bearing -- without them pyright
+# resolves no langchain/langgraph/deepagents and reports 17 phantom
+# reportMissingImports for packages that are in fact installed.
+[tool.pyright]
+include = ["vvaharness/validation", "vvaharness/backends/harness", "vvaharness/models",
+           "vvaharness/remediation_agent",
+           "vvaharness/api.py", "vvaharness/report/rows.py",
+           "vvaharness/orchestrator/artifacts.py", "vvaharness/orchestrator/case_ids.py",
+           "vvaharness/orchestrator/findings_json.py", "vvaharness/orchestrator/sarif_ids.py",
+           "vvaharness/util/pricing.py", "vvaharness/util/stage_telemetry.py"]
+# _scan.py holds the detection contracts, moved verbatim into the models package. It predates
+# this gate and reports ~40 findings that no single change should be sweeping.
+exclude = ["vvaharness/models/_scan.py"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportPrivateUsage = false

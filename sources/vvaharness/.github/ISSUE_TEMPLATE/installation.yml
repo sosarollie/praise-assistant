@@ -1,0 +1,76 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: "🛠️ Installation / setup problem"
+description: "Trouble installing, configuring credentials, or running vvaharness doctor"
+title: "[Setup]: "
+labels: ["type:setup", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: "Please run vvaharness doctor first and review https://github.com/visa/visa-vulnerability-agentic-harness/blob/main/docs/SETUP_GUIDE.md and https://github.com/visa/visa-vulnerability-agentic-harness/blob/main/docs/configuration.md before filing."
+  - type: input
+    id: environment
+    attributes:
+      label: OS, Python version, install method
+      placeholder: "e.g. macOS 15, Python 3.12, pipx"
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Profile in use
+      options: ["default.yaml", "sdk.yaml", "taint.yaml", "full.yaml", "custom", "not sure"]
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend you are configuring
+      options: ["cli (Claude CLI login)", "sdk (Anthropic SDK key)", "openai (OpenAI-compatible)", "deepagents (provider-routed)", "mixed / custom", "not sure"]
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command that fails
+      options: ["setup", "doctor", "scan", "remediate", "validate", "ev-replay", "estimate", "install step", "other"]
+    validations:
+      required: true
+  - type: textarea
+    id: executed
+    attributes:
+      label: Exact command(s) executed
+      placeholder: "e.g. pip install ."
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of vvaharness doctor
+      description: "Redact any tokens/keys before pasting."
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's failing?
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: "I understand that any Contribution I submit is subject to the **Contribution Submission Terms and Agreement** within [**CONTRIBUTING.md**](https://github.com/visa/visa-vulnerability-agentic-harness/blob/main/CONTRIBUTING.md), including the provisions on Ownership and Sufficient Rights, Legal Authority to Bind, No Conflicting Obligations, No Restricted Data, and Applicable License Terms, and further that a record of my agreement to these terms, including my username and submission metadata, will be maintained indefinitely as part of the project's public record, and that the rights I have granted under the applicable license are irrevocable."
+          required: true

@@ -1,0 +1,85 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# ============================================================================
+# Remediation Policy — HARD GATES
+# ----------------------------------------------------------------------------
+# Loaded by the Remediation Agent BEFORE any LLM call. This is enforcement,
+# not guidance. A finding that matches `deny` is short-circuited to
+# guidance-only output; the patch agent is never invoked.
+#
+# Semantics:
+#   - default_action: what happens when a CWE matches NO rule. BINARY:
+#       * allow → every non-denied CWE is patched (pair with an empty allow list)
+#       * deny  → only CWEs on the allow list are patched (pair with empty deny)
+#   - deny:  CWEs (and all their descendants) that MUST NOT be patched
+#   - allow: CWEs eligible for patch generation
+#   - Evaluation order: kill_switch → deny → deny_paths → allow → default_action
+#   - Fail-closed: missing/invalid policy file ⇒ treat ALL as deny
+# ============================================================================
+
+schema_version: "1.0"
+
+# default_action: allow → patch everything EXCEPT what the deny list blocks.
+# With an empty allow list below, every non-denied CWE becomes patch-eligible.
+default_action: allow     # anything not explicitly denied → patch
+
+# Global kill-switch. Either of these forces EVERY decide() to
+# GUIDANCE_ONLY regardless of the rules below — for stopping a
+# bad-patch batch run mid-flight without restart.
+kill_switch:
+  env_var: VVAHARNESS_REMEDIATE_DISABLE   # "1"/"true" → disable
+  file:    ./.vvaharness-remediate-off    # presence → disable
+
+# ----------------------------------------------------------------------------
+# DENY — never generate a patch. Emit prose guidance + route to human.
+# Includes the full descendant set so child CWEs can't slip through.
+# ----------------------------------------------------------------------------
+deny: []
+# ----------------------------------------------------------------------------
+# Secondary guards — even for ALLOWED CWEs, skip patch if finding touches
+# a sensitive path. Belt-and-suspenders for monorepos. Matched against BOTH
+# the finding location (pre-gate) AND the diff's changed-file set (post-gate);
+# a post-gate hit reverts the offending file and downgrades to guidance.
+# ----------------------------------------------------------------------------
+deny_paths: []
+
+# ----------------------------------------------------------------------------
+# Patches that TOUCH any of these paths are hard-rejected, regardless of CWE.
+# Running build/test commands against an LLM-modified build script = arbitrary
+# code execution on the scanner host. This list is matched against the diff's
+# changed-file set, not the finding location. A post-gate hit reverts the
+# offending file on disk and downgrades the verdict to guidance.
+# ----------------------------------------------------------------------------
+forbid_patch_paths:
+  # Repository automation and version-control metadata execute with privileges
+  # outside the scanned application. Keep autonomous fixes in ordinary source.
+  - "**/.git"
+  - "**/.git/**"
+  - "**/.github/**"
+  - "**/.gitlab/**"
+  - "**/.gitlab-ci.*"
+  - "**/.circleci/**"
+  - "**/.buildkite/**"
+  - "**/Jenkinsfile*"
+  - "**/azure-pipelines*.yml"
+  - "**/azure-pipelines*.yaml"
+  - "**/bitbucket-pipelines.yml"
+  - "**/bitbucket-pipelines.yaml"
+  - "**/cloudbuild.yml"
+  - "**/cloudbuild.yaml"
+  - "**/buildspec.yml"
+  - "**/buildspec.yaml"
+  - "**/.githooks/**"
+  - "**/.husky/**"

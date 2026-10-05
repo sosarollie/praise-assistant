@@ -1,0 +1,50 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# VisaVulnerabilityAgenticHarness .gitattributes
+
+# Normalize line endings on commit; check out platform-native.
+* text=auto
+
+# Force EOL by type so scripts stay runnable on every platform.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# Treat these as binary (no EOL munging, no diff noise).
+*.pem  binary
+*.p12  binary
+*.pfx  binary
+*.jks  binary
+*.whl  binary
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.pkl  binary
+*.pptx binary
+*.docx binary
+*.xlsx binary
+
+# Second layer: keep internal artifacts out of `git archive` tarballs even
+# if a file slips past .gitignore into the tree.
+.env             export-ignore
+.env.*           export-ignore
+# …but the tracked template MUST ship in release tarballs (documented setup
+# step: `cp .env.example .env`). Last matching line wins, so un-set it.
+.env.example     -export-ignore
+.env.exploit.example     -export-ignore
+

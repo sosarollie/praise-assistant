@@ -1,0 +1,2495 @@
+"""
+JavaScript/TypeScript to Frame SIL Frontend.
+
+This module translates JavaScript and TypeScript source code to Frame SIL
+using tree-sitter for parsing. It handles:
+- Function definitions (regular, arrow, async)
+- Variable declarations (var, let, const)
+- Function calls (with taint source/sink detection)
+- Control flow (if/else, while, for, switch)
+- String operations (concatenation, template literals)
+- Class methods
+- Object destructuring
+"""
+
+import re
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field
+
+try:
+    import tree_sitter_javascript as tsjavascript
+    from tree_sitter import Language, Parser, Node as TSNode
+    TREE_SITTER_JS_AVAILABLE = True
+except ImportError:
+    TREE_SITTER_JS_AVAILABLE = False
+    TSNode = Any
+
+try:
+    import tree_sitter_typescript as tstypescript
+    TREE_SITTER_TS_AVAILABLE = True
+except ImportError:
+    TREE_SITTER_TS_AVAILABLE = False
+
+from frame.sil.types import (
+    Ident, PVar, Typ, TypeKind, Location,
+    Exp, ExpVar, ExpConst, ExpBinOp, ExpUnOp,
+    ExpFieldAccess, ExpIndex, ExpStringConcat, ExpCall,
+    var, const
+)
+from frame.sil.instructions import (
+    Instr, Load, Store, Alloc, Free, Prune, Call, Assign, Return,
+    TaintSource, TaintSink, Sanitize,
+    TaintKind, SinkKind, PruneKind
+)
+from frame.sil.procedure import Procedure, Node, NodeKind, ProcSpec, Program
+from frame.sil.loop_exit import body_can_exit_loop
+from frame.sil.specs.javascript_specs import JAVASCRIPT_SPECS
+
+
+# Mapping from spec sink type strings to SinkKind enum
+# Available SinkKind values: SQL_QUERY, HTML_OUTPUT, SHELL_COMMAND, LDAP_QUERY,
+# XPATH_QUERY, EVAL, TEMPLATE, NOSQL_QUERY, XML_PARSE, REGEX, ORM_QUERY,
+# EXPRESSION_LANG, FILE_PATH, REDIRECT, SSRF, AUTHZ_CHECK, CORS, HEADER,
+# SECRET_EXPOSURE, DEBUG_INFO, WEAK_CRYPTO, HARDCODED_SECRET, INSECURE_RANDOM,
+# WEAK_HASH, CREDENTIAL, SESSION, PASSWORD_STORE, TRUST_BOUNDARY, INSECURE_COOKIE,
+# DESERIALIZATION, LOG, SENSITIVE_LOG, ERROR_DISCLOSURE, XSS, COMMAND, MEMORY
+SINK_TYPE_MAP = {
+    # Direct matches
+    "sql": SinkKind.SQL_QUERY,
+    "html": SinkKind.HTML_OUTPUT,
+    "xss": SinkKind.XSS,
+    "command": SinkKind.COMMAND,
+    "shell": SinkKind.SHELL_COMMAND,
+    "ldap": SinkKind.LDAP_QUERY,
+    "xpath": SinkKind.XPATH_QUERY,
+    "eval": SinkKind.EVAL,
+    "template": SinkKind.TEMPLATE,
+    "redirect": SinkKind.REDIRECT,
+    "ssrf": SinkKind.SSRF,
+    "deserialize": SinkKind.DESERIALIZATION,
+
+    # Path/filesystem
+    "path": SinkKind.FILE_PATH,
+    "filesystem": SinkKind.FILE_PATH,
+    "file": SinkKind.FILE_PATH,
+
+    # NoSQL
+    "nosql": SinkKind.NOSQL_QUERY,
+
+    # Crypto
+    "weak_crypto": SinkKind.WEAK_CRYPTO,
+    "weak_hash": SinkKind.WEAK_HASH,
+    "hardcoded_secret": SinkKind.HARDCODED_SECRET,
+    "hardcoded_cred": SinkKind.CREDENTIAL,
+    "insecure_random": SinkKind.INSECURE_RANDOM,
+
+    # Auth/session
+    "auth": SinkKind.AUTHZ_CHECK,
+    "session": SinkKind.SESSION,
+
+    # Headers
+    "header": SinkKind.HEADER,
+    "header_injection": SinkKind.HEADER,
+
+    # Logging
+    "sensitive_log": SinkKind.SENSITIVE_LOG,
+    "log_injection": SinkKind.LOG,
+
+    # Misc
+    "code": SinkKind.EVAL,
+    "config": SinkKind.SECRET_EXPOSURE,
+    "cors": SinkKind.CORS,
+    "ssl": SinkKind.WEAK_CRYPTO,
+    "exception": SinkKind.ERROR_DISCLOSURE,
+    "info_disclosure": SinkKind.DEBUG_INFO,
+    "prototype_pollution": SinkKind.EVAL,  # Closest match
+    "redos": SinkKind.REGEX,
+}
+
+
+def _get_sink_kind(spec_type: str) -> SinkKind:
+    """Convert spec sink type string to SinkKind enum"""
+    if spec_type in SINK_TYPE_MAP:
+        return SINK_TYPE_MAP[spec_type]
+    # Try direct conversion
+    try:
+        return SinkKind(spec_type)
+    except ValueError:
+        return SinkKind.SQL_QUERY  # Default fallback
+
+
+class JavaScriptFrontend:
+    """
+    Translates JavaScript/TypeScript source code to Frame SIL.
+
+    Usage:
+        frontend = JavaScriptFrontend()
+        program = frontend.translate(source_code, "example.js")
+
+        # Now use SILTranslator to generate vulnerability checks
+        from frame.sil import SILTranslator
+        translator = SILTranslator(program)
+        checks = translator.translate_program()
+    """
+
+    def __init__(self, specs: Dict[str, ProcSpec] = None, language: str = "javascript"):
+        """
+        Initialize the JavaScript/TypeScript frontend.
+
+        Args:
+            specs: Library specifications (defaults to JAVASCRIPT_SPECS)
+            language: "javascript" or "typescript"
+        """
+        self.language = language
+
+        if language == "typescript":
+            if not TREE_SITTER_TS_AVAILABLE:
+                raise ImportError(
+                    "tree-sitter-typescript is required for TypeScript. "
+                    "Install with: pip install tree-sitter-typescript"
+                )
+            self.parser = Parser(Language(tstypescript.language_typescript()))
+        else:
+            if not TREE_SITTER_JS_AVAILABLE:
+                raise ImportError(
+                    "tree-sitter-javascript is required. "
+                    "Install with: pip install tree-sitter-javascript"
+                )
+            self.parser = Parser(Language(tsjavascript.language()))
+
+        self.specs = specs or JAVASCRIPT_SPECS
+
+        # State during translation
+        self._filename = "<unknown>"
+        self._source = ""
+        self._current_proc: Optional[Procedure] = None
+        self._current_node: Optional[Node] = None
+        self._node_counter = 0
+        self._ident_counter = 0
+        self._current_class: Optional[str] = None
+        # Treat function parameters as untrusted input. In Node.js packages the
+        # exported API is the attack surface (callers pass attacker-controlled
+        # data), so this is the pure-SL recall lever for real-world JS, mirroring
+        # the C# action-parameter lever.
+        self.taint_function_params: bool = False
+
+    def translate(self, source_code: str, filename: str = "<unknown>") -> Program:
+        """
+        Translate JavaScript/TypeScript source code to SIL Program.
+
+        Args:
+            source_code: Source code string
+            filename: Source file name for error reporting
+
+        Returns:
+            SIL Program containing all translated procedures
+        """
+        self._filename = filename
+        self._source = source_code
+        self._source_bytes = source_code.encode("utf-8")
+        self._node_counter = 0
+        self._ident_counter = 0
+
+        # Parse source code
+        tree = self.parser.parse(self._source_bytes)
+
+        # Create program with library specs
+        program = Program(library_specs=self.specs.copy(), language=self.language)
+        program.source_files.append(filename)
+
+        # Walk top-level definitions
+        self._translate_module(tree.root_node, program)
+
+        # One-hop interprocedural taint: a request-derived value passed to a
+        # same-file function taints that function's parameter (e.g. a handler
+        # computes `file` from req and calls a helper verify(file) that sends it).
+        self._propagate_js_interprocedural(tree.root_node, program)
+
+        # The whole-file ReDoS and prototype-pollution passes are structural
+        # heuristics, not taint-gated. On vendored third-party libraries and
+        # minified/generated bundles they produce almost only false positives
+        # (the code is not the application's own and is never going to be fixed
+        # here), so -- like mainstream SAST tools -- we skip these heuristics on
+        # such files. Taint-based detection still runs everywhere.
+        if not self._is_vendored_or_minified():
+            self._scan_redos(tree.root_node, program)
+            self._scan_proto_pollution(tree.root_node, program)
+
+        return program
+
+    # Third-party library / generated-bundle detection: filename conventions
+    # plus a content check for minification. Used to suppress the structural
+    # ReDoS / prototype-pollution heuristics on non-application code.
+    _VENDOR_DIR_RE = re.compile(
+        r"/(?:lib|libs|vendor|vendors|plugins?|external|third[_-]?party|"
+        r"bower_components|node_modules|jspm_packages|dist|build|min)/", re.I)
+    _LIB_NAME_RE = re.compile(
+        r"(?:^|[-_.])(?:jquery|jquery-?ui|bootstrap|angular|backbone|underscore|"
+        r"lodash|moment|modernizr|d3|react|react-dom|vue|ember|knockout|prototype|"
+        r"mootools|dojo|extjs|tinymce|ckeditor|wysihtml5|select2|datatables|"
+        r"highcharts|chartjs|three|ace|requirejs|handlebars|mustache|popper|slick|"
+        r"swiper|flatpickr|axios|zepto|hammer|normalize|polyfill)(?:[-_.]|\d|$)",
+        re.I)
+    _VERSION_IN_NAME_RE = re.compile(r"[-_.]\d+\.\d+")
+
+    def _is_vendored_or_minified(self) -> bool:
+        """True for third-party libraries and minified/generated JS bundles."""
+        fn = (self._filename or "").replace("\\", "/")
+        low = fn.lower()
+        if ".min." in low or low.endswith((".bundle.js", ".map")):
+            return True
+        if self._VENDOR_DIR_RE.search("/" + fn.strip("/") + "/"):
+            return True
+        base = fn.rsplit("/", 1)[-1]
+        if self._VERSION_IN_NAME_RE.search(base) or self._LIB_NAME_RE.search(base):
+            return True
+        # Content minification: a very long physical line is the reliable signal.
+        for line in (self._source or "").splitlines():
+            if len(line) > 800:
+                return True
+        return False
+
+    # Every function-like node becomes its own procedure -- including callbacks
+    # and route handlers like `app.post(path, (req,res) => {...})`, which are
+    # the dominant entry points in real Node.js/Express code.
+    _FUNC_NODE_TYPES = (
+        "function_declaration", "function_expression", "function",
+        "arrow_function", "generator_function", "generator_function_declaration",
+        "method_definition",
+    )
+
+    def _translate_module(self, root: TSNode, program: Program) -> None:
+        """Translate module-level definitions and every nested function.
+
+        First the original top-level handling (named declarations, exports,
+        IIFEs), then a recursive sweep that translates any remaining function
+        expression -- callbacks, route handlers, object methods, promise
+        chains -- as its own procedure so their bodies are analyzed.
+        """
+        seen_ids = set()
+        for child in root.children:
+            self._translate_top_level(child, program, seen_ids)
+        self._collect_nested_functions(root, program, seen_ids)
+
+    def _collect_nested_functions(self, node: TSNode, program: Program,
+                                  seen_ids: set) -> None:
+        """Recursively translate every function-like node not already handled."""
+        stack = list(node.children)
+        while stack:
+            cur = stack.pop()
+            # Guard with a body field: the bare `function` keyword is also a
+            # node of type "function" but has no body, and would otherwise
+            # produce an empty procedure that overwrites the real one.
+            if (cur.type in self._FUNC_NODE_TYPES and cur.id not in seen_ids
+                    and cur.child_by_field_name("body") is not None):
+                seen_ids.add(cur.id)
+                if cur.type == "method_definition":
+                    proc = self._translate_method(cur)
+                else:
+                    name = self._infer_func_name(cur)
+                    # Distinct nested functions (e.g. a route handler and a
+                    # .then()/callback arrow inside it) would otherwise both be
+                    # 'anonymous' and collide in the procedures dict, silently
+                    # overwriting the handler that holds the sink. Disambiguate.
+                    if program.has_procedure(name):
+                        name = f"{name}_{cur.id}"
+                    proc = self._translate_function(cur, name=name)
+                if proc:
+                    program.add_procedure(proc)
+            stack.extend(cur.children)
+
+    def _infer_func_name(self, node: TSNode) -> str:
+        """Best-effort name for an anonymous function/arrow (from a containing
+        declarator, assignment, or object property), else 'anonymous'."""
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            return self._get_text(name_node)
+        parent = node.parent
+        if parent is not None:
+            if parent.type == "variable_declarator":
+                nm = parent.child_by_field_name("name")
+                if nm:
+                    return self._get_text(nm)
+            if parent.type == "pair":
+                key = parent.child_by_field_name("key")
+                if key:
+                    return self._get_text(key)
+            if parent.type == "assignment_expression":
+                left = parent.child_by_field_name("left")
+                if left:
+                    return self._get_text(left)
+        return "anonymous"
+
+    def _translate_top_level(self, node: TSNode, program: Program,
+                             seen_ids: set = None) -> None:
+        """Translate a top-level statement"""
+        if seen_ids is None:
+            seen_ids = set()
+        if node.type == "function_declaration":
+            seen_ids.add(node.id)
+            proc = self._translate_function(node)
+            if proc:
+                program.add_procedure(proc)
+
+        elif node.type == "class_declaration":
+            self._translate_class(node, program, seen_ids)
+
+        elif node.type == "lexical_declaration" or node.type == "variable_declaration":
+            # const/let/var declarations - check for function expressions
+            self._translate_variable_declaration(node, program, seen_ids)
+
+        elif node.type == "export_statement":
+            # Handle exports
+            for child in node.children:
+                self._translate_top_level(child, program, seen_ids)
+
+        elif node.type == "expression_statement":
+            # Check for IIFE or function expressions
+            for child in node.children:
+                if child.type == "call_expression":
+                    func = child.child_by_field_name("function")
+                    if func and func.type in ("arrow_function", "function"):
+                        seen_ids.add(func.id)
+                        proc = self._translate_function(func, name="anonymous")
+                        if proc:
+                            program.add_procedure(proc)
+
+    def _translate_variable_declaration(self, node: TSNode, program: Program,
+                                        seen_ids: set = None) -> None:
+        """Translate variable declarations, extracting function expressions"""
+        if seen_ids is None:
+            seen_ids = set()
+        for child in node.children:
+            if child.type == "variable_declarator":
+                name_node = child.child_by_field_name("name")
+                value_node = child.child_by_field_name("value")
+
+                if name_node and value_node:
+                    var_name = self._get_text(name_node)
+                    if value_node.type in ("arrow_function", "function"):
+                        seen_ids.add(value_node.id)
+                        proc = self._translate_function(value_node, name=var_name)
+                        if proc:
+                            program.add_procedure(proc)
+
+    def _translate_class(self, node: TSNode, program: Program,
+                         seen_ids: set = None) -> None:
+        """Translate class definition"""
+        if seen_ids is None:
+            seen_ids = set()
+        name_node = node.child_by_field_name("name")
+        class_name = self._get_text(name_node) if name_node else "UnknownClass"
+
+        self._current_class = class_name
+
+        # Find class body
+        body_node = node.child_by_field_name("body")
+        if body_node:
+            for child in body_node.children:
+                if child.type == "method_definition":
+                    seen_ids.add(child.id)
+                    proc = self._translate_method(child)
+                    if proc:
+                        proc.class_name = class_name
+                        proc.name = f"{class_name}.{proc.name}"
+                        program.add_procedure(proc)
+
+                elif child.type == "field_definition":
+                    # Check for arrow function fields
+                    value = child.child_by_field_name("value")
+                    if value and value.type == "arrow_function":
+                        name_node = child.child_by_field_name("property")
+                        if name_node:
+                            seen_ids.add(value.id)
+                            method_name = self._get_text(name_node)
+                            proc = self._translate_function(value, name=method_name, is_method=True)
+                            if proc:
+                                proc.class_name = class_name
+                                proc.name = f"{class_name}.{proc.name}"
+                                program.add_procedure(proc)
+
+        self._current_class = None
+
+    def _translate_method(self, node: TSNode) -> Optional[Procedure]:
+        """Translate class method definition"""
+        name_node = node.child_by_field_name("name")
+        if not name_node:
+            return None
+
+        method_name = self._get_text(name_node)
+
+        # Get parameters
+        params = []
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = self._translate_parameters(params_node)
+
+        # Create procedure
+        proc = Procedure(
+            name=method_name,
+            params=params,
+            ret_type=Typ.unknown_type(),
+            loc=self._get_location(node),
+            is_method=True,
+        )
+
+        # Check for static
+        for child in node.children:
+            if self._get_text(child) == "static":
+                proc.is_static = True
+                break
+
+        return self._translate_function_body(node, proc)
+
+    def _translate_function(
+        self,
+        node: TSNode,
+        name: str = None,
+        is_method: bool = False
+    ) -> Optional[Procedure]:
+        """Translate function/arrow function definition to SIL Procedure"""
+        # Get function name
+        if name is None:
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = self._get_text(name_node)
+            else:
+                name = "anonymous"
+
+        # Get parameters
+        params = []
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = self._translate_parameters(params_node)
+
+        # For arrow functions, parameter might be a single identifier
+        if node.type == "arrow_function" and not params_node:
+            param_node = node.child_by_field_name("parameter")
+            if param_node:
+                param_name = self._get_text(param_node)
+                params = [(PVar(param_name), Typ.unknown_type())]
+
+        # Create procedure
+        proc = Procedure(
+            name=name,
+            params=params,
+            ret_type=Typ.unknown_type(),
+            loc=self._get_location(node),
+            is_method=is_method,
+        )
+
+        return self._translate_function_body(node, proc)
+
+    def _translate_function_body(self, node: TSNode, proc: Procedure) -> Procedure:
+        """Translate function body to SIL"""
+        self._current_proc = proc
+        self._node_counter = 0
+
+        # Create entry node
+        entry = proc.new_node(NodeKind.ENTRY)
+        proc.add_node(entry)
+        proc.entry_node = entry.id
+        self._current_node = entry
+
+        # Find and translate body
+        body_node = node.child_by_field_name("body")
+
+        # Treat the function's parameters as untrusted input (pure-SL recall
+        # lever for real-world JS where the attack surface is exported APIs).
+        if self.taint_function_params:
+            own = {str(param) for param, _ in proc.params}
+            for param, _ in proc.params:
+                self._add_instr(TaintSource(
+                    loc=proc.loc, var=param,
+                    kind=TaintKind.USER_INPUT,
+                    description="function parameter (untrusted input)"))
+
+            # Closure capture: a nested function (callback, Promise executor,
+            # ...) sees its enclosing functions' parameters AND locals as free
+            # variables. In library mode those outer values are untrusted, so the
+            # capture carries the taint -- e.g.
+            #   function file(req,res){ var fp = path.join(dir, req.url);
+            #     fs.exists(fp, () => fs.readFile(fp, cb)); }
+            # where the readFile sink sits two callbacks deep from where `fp` is
+            # a tainted local. Taint any captured outer name referenced here that
+            # this function doesn't shadow with its own parameter.
+            enclosing = (self._enclosing_param_names(node)
+                         | self._enclosing_local_names(node)) - own
+            if enclosing and body_node is not None:
+                referenced = self._referenced_identifiers(body_node)
+                for nm in sorted(enclosing & referenced):
+                    self._add_instr(TaintSource(
+                        loc=proc.loc, var=PVar(nm),
+                        kind=TaintKind.USER_INPUT,
+                        description="captured untrusted variable (closure)"))
+        # Express-style request destructuring is a taint source regardless of
+        # library mode: `({ body, params, query }: Request, res, next) => ...`.
+        # `params.file` is then user-controlled just like `req.params.file`.
+        for nm in self._express_request_source_names(node):
+            self._add_instr(TaintSource(
+                loc=proc.loc, var=PVar(nm), kind=TaintKind.USER_INPUT,
+                description="destructured Express request property (user input)"))
+
+        # Closure capture of REQUEST-DERIVED enclosing locals (precise, always on):
+        # e.g. `const id = req.body.id` in a handler, then a `.then(r => db.update(
+        # { _id: id }, ...))` callback whose only sink sits inside the callback.
+        # Unlike library mode this taints only request-derived captures, not all
+        # captured names, so it does not add the library-mode false positives.
+        if body_node is not None and not self.taint_function_params:
+            own = {str(param) for param, _ in proc.params}
+            captured = ((self._enclosing_request_derived_locals(node)
+                         & self._referenced_identifiers(body_node)) - own)
+            for nm in sorted(captured):
+                self._add_instr(TaintSource(
+                    loc=proc.loc, var=PVar(nm), kind=TaintKind.USER_INPUT,
+                    description="captured request-derived variable (closure)"))
+
+        if body_node:
+            if body_node.type == "statement_block":
+                self._translate_block(body_node)
+            else:
+                # Arrow function with expression body: () => expr
+                exp = self._translate_expression(body_node)
+                self._add_instr(Return(loc=self._get_location(body_node), value=exp))
+
+        # Create exit node
+        exit_node = proc.new_node(NodeKind.EXIT)
+        proc.add_node(exit_node)
+        proc.exit_node = exit_node.id
+
+        # Connect last node to exit
+        if self._current_node:
+            proc.connect(self._current_node.id, exit_node.id)
+
+        self._current_proc = None
+        return proc
+
+    _FUNC_LIKE = {"arrow_function", "function", "function_declaration",
+                  "function_expression", "method_definition",
+                  "generator_function", "generator_function_declaration"}
+
+    @staticmethod
+    def _has_unbounded_quant(body: str) -> bool:
+        """True if `body` contains an unescaped unbounded quantifier (*, +, {n,})."""
+        i, n = 0, len(body)
+        while i < n:
+            c = body[i]
+            if c == '\\':
+                i += 2
+                continue
+            if c in '*+':
+                return True
+            if c == '{':
+                j = body.find('}', i)
+                if j != -1 and ',' in body[i:j]:
+                    return True
+            i += 1
+        return False
+
+    _WORD_CHARS = frozenset('0123456789abcdefghijklmnopqrstuvwxyz'
+                            'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')
+    _DIGIT_CHARS = frozenset('0123456789')
+    _SPACE_CHARS = frozenset(' \t\n\r\f\v')
+
+    @classmethod
+    def _expand_class(cls, inner: str) -> frozenset:
+        """Expand a char-class body (without [ ]) to its set of chars, resolving
+        ranges (a-z) and the common \\d/\\w/\\s escapes."""
+        chars = set()
+        i = 0
+        while i < len(inner):
+            c = inner[i]
+            if c == '\\' and i + 1 < len(inner):
+                e = inner[i + 1]
+                chars |= {'d': cls._DIGIT_CHARS, 'w': cls._WORD_CHARS,
+                          's': cls._SPACE_CHARS}.get(e, frozenset(e))
+                i += 2
+                continue
+            if (i + 2 < len(inner) and inner[i + 1] == '-'
+                    and inner[i + 2] != ']'):
+                try:
+                    for o in range(ord(c), ord(inner[i + 2]) + 1):
+                        chars.add(chr(o))
+                except ValueError:
+                    pass
+                i += 3
+                continue
+            chars.add(c)
+            i += 1
+        return frozenset(chars)
+
+    @classmethod
+    def _branch_first_set(cls, branch: str):
+        """First-character matcher for a regex branch, as a (negated, set) pair;
+        set==None means 'matches any character' (the '.' case)."""
+        branch = branch.lstrip('^')
+        if not branch:
+            return (False, frozenset())
+        c = branch[0]
+        if c == '\\' and len(branch) > 1:
+            esc = branch[1]
+            pos = {'d': cls._DIGIT_CHARS, 'w': cls._WORD_CHARS,
+                   's': cls._SPACE_CHARS}
+            if esc in pos:
+                return (False, pos[esc])
+            if esc == 'D':
+                return (True, cls._DIGIT_CHARS)
+            if esc == 'W':
+                return (True, cls._WORD_CHARS)
+            if esc == 'S':
+                return (True, cls._SPACE_CHARS)
+            return (False, frozenset(esc))
+        if c == '.':
+            return (False, None)
+        if c == '[':
+            end = branch.find(']', 2 if branch[1:2] == '^' else 1)
+            inner = branch[1:end] if end != -1 else branch[1:]
+            if inner.startswith('^'):
+                return (True, cls._expand_class(inner[1:]))
+            return (False, cls._expand_class(inner))
+        if c in '(*+?':
+            return (False, None)  # nested group / quantifier -- be conservative
+        return (False, frozenset(c))
+
+    @staticmethod
+    def _first_sets_overlap(a, b) -> bool:
+        """Whether two (negated, set) first-character matchers can match a common
+        character."""
+        na, sa = a
+        nb, sb = b
+        if sa is None or sb is None:        # '.' matches anything
+            return True
+        if not na and not nb:
+            return bool(sa & sb)
+        if na and nb:
+            return True                      # two negated sets always share chars
+        # one positive, one negated: positive has a char outside the negated set
+        pos, neg = (sa, sb) if not na else (sb, sa)
+        return bool(pos - neg)
+
+    def _alternation_overlaps(self, body: str) -> bool:
+        """True if a top-level alternation has overlapping branches (so a string
+        can be matched more than one way -- the source of catastrophic
+        backtracking when the group is quantified)."""
+        # Split on top-level '|' (ignore '|' inside nested groups / classes).
+        branches, depth, in_class, cur = [], 0, False, []
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch == '\\':
+                cur.append(body[i:i + 2])
+                i += 2
+                continue
+            if ch == '[':
+                in_class = True
+            elif ch == ']':
+                in_class = False
+            elif ch == '(' and not in_class:
+                depth += 1
+            elif ch == ')' and not in_class:
+                depth -= 1
+            elif ch == '|' and depth == 0 and not in_class:
+                branches.append(''.join(cur))
+                cur = []
+                i += 1
+                continue
+            cur.append(ch)
+            i += 1
+        branches.append(''.join(cur))
+        if len(branches) < 2:
+            return False
+        stripped = [b.lstrip('^') for b in branches]
+        sets = [self._branch_first_set(b) for b in branches]
+        for a in range(len(branches)):
+            for b in range(a + 1, len(branches)):
+                (na, sa), (nb, sb) = sets[a], sets[b]
+                if sa is None or sb is None or na or nb:
+                    # A '.'/negated branch is broad; fall back to set overlap.
+                    if self._first_sets_overlap(sets[a], sets[b]):
+                        return True
+                    continue
+                # Two positive branches are ambiguous under a quantifier only
+                # when one can be a prefix of the other (a|ab, \d|\d\d) -- sharing
+                # just a first character (~0|~1) is disambiguated by later chars.
+                if sa & sb and (stripped[a].startswith(stripped[b])
+                                or stripped[b].startswith(stripped[a])):
+                    return True
+        return False
+
+    def redos_patterns(self, source_code: str) -> set:
+        """The set of catastrophic-backtracking regex patterns this frontend
+        would flag in `source_code` (literals and RegExp(...) string args).
+        Exposed so callers can compare a vulnerable vs patched file at the
+        regex level -- a static detector cannot observe runtime length-cap
+        mitigations, so an unchanged catastrophic regex is not a false flag."""
+        self._source_bytes = source_code.encode("utf-8")
+        self._source = source_code
+        tree = self.parser.parse(self._source_bytes)
+        out = set()
+        stack = [tree.root_node]
+        while stack:
+            n = stack.pop()
+            if n.type == "regex":
+                p = n.child_by_field_name("pattern")
+                if p is not None:
+                    pat = self._get_text(p)
+                    if self._is_redos_pattern(pat):
+                        out.add(pat)
+            elif n.type in ("new_expression", "call_expression"):
+                callee = (n.child_by_field_name("constructor")
+                          if n.type == "new_expression"
+                          else n.child_by_field_name("function"))
+                if callee is not None and self._get_text(callee) in ("RegExp", "global.RegExp"):
+                    an = n.child_by_field_name("arguments")
+                    for child in (an.children if an is not None else []):
+                        if child.type in ("string", "template_string"):
+                            raw = self._get_text(child)
+                            inner = raw[1:-1] if len(raw) >= 2 else raw
+                            if self._is_redos_pattern(inner):
+                                out.add(inner)
+                            break
+            stack.extend(n.children)
+        return out
+
+    def _is_redos_pattern(self, pattern: str) -> bool:
+        """Heuristic detector for super-linear (ReDoS) regex patterns: a group
+        that is itself quantified (*, +, {n,}) AND whose body contains an
+        unbounded inner quantifier or an alternation -- the classic
+        catastrophic-backtracking shape: (a+)+, (.*,)+, (\\d+)*, ([a-z]+)*,
+        (a|aa)+, (?:(?:\\s*;\\s*)|x)*. Bracket-matching handles nested groups.
+        A plain quantified group like (abc)+ is NOT flagged, keeping precision
+        high."""
+        if not pattern:
+            return False
+        n = len(pattern)
+        i = 0
+        while i < n:
+            c = pattern[i]
+            if c == '\\':
+                i += 2
+                continue
+            if c == ')':
+                nxt = pattern[i + 1] if i + 1 < n else ''
+                # NB: use tuple membership, not `nxt in '*+'` -- an empty `nxt`
+                # (a group closing at end-of-pattern) is a *substring* of any
+                # string, so `'' in '*+'` is True and would treat every
+                # pattern-final group like ([^;]+) as quantified (a major ReDoS
+                # false-positive source).
+                quantified = nxt in ('*', '+', '{')
+                if quantified:
+                    # Find the matching '(' by backward bracket-matching.
+                    depth = 0
+                    k = i
+                    while k >= 0:
+                        ck = pattern[k]
+                        escaped = k > 0 and pattern[k - 1] == '\\'
+                        if not escaped and ck == ')':
+                            depth += 1
+                        elif not escaped and ck == '(':
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        k -= 1
+                    if k >= 0:
+                        body = pattern[k + 1:i]
+                        for pfx in ('?:', '?=', '?!', '?<=', '?<!'):
+                            if body.startswith(pfx):
+                                body = body[len(pfx):]
+                                break
+                        # Catastrophic when the quantified group's body has an
+                        # unbounded inner quantifier (nested quantifier, e.g.
+                        # (\d+)*) or an overlapping alternation under the
+                        # quantifier (e.g. (a|aa)+, (.|x)*, \d|\d\d). A clearly
+                        # disjoint alternation like ([a-z0-9]|-)* or (~0|~1)+ is
+                        # linear and is not flagged, keeping precision high.
+                        if self._has_unbounded_quant(body):
+                            return True
+                        if '|' in body and self._alternation_overlaps(body):
+                            return True
+            i += 1
+        return False
+
+    def _scan_redos(self, root: TSNode, program: Program) -> None:
+        """Whole-file pass: collect every catastrophic-backtracking regex
+        (literal or `new RegExp("...")`/`RegExp("...")`) and emit a usage-based
+        ReDoS finding for each into a synthetic procedure. Doing this at file
+        scope (rather than per-expression) covers module-level regex constants,
+        which are where most real-world ReDoS lives."""
+        hits = []  # list of Location
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            if n.type == "regex":
+                pat = n.child_by_field_name("pattern")
+                if pat is not None and self._is_redos_pattern(self._get_text(pat)):
+                    hits.append(self._get_location(n))
+            elif n.type in ("new_expression", "call_expression"):
+                callee = (n.child_by_field_name("constructor")
+                          if n.type == "new_expression"
+                          else n.child_by_field_name("function"))
+                if callee is not None and self._get_text(callee) in ("RegExp", "global.RegExp"):
+                    args_node = n.child_by_field_name("arguments")
+                    if args_node is not None:
+                        for child in args_node.children:
+                            if child.type in ("string", "template_string"):
+                                raw = self._get_text(child)
+                                inner = raw[1:-1] if len(raw) >= 2 else raw
+                                if self._is_redos_pattern(inner):
+                                    hits.append(self._get_location(n))
+                                break
+            stack.extend(n.children)
+
+        self._emit_findings_proc(program, "<module-redos>", "__redos__", hits)
+
+    # A genuine guard COMPARES a key against a dangerous name or keeps a denylist
+    # -- distinct from merely mentioning __proto__ (which vulnerable code does
+    # too, e.g. when it sets that key or in a comment).
+    _PROTO_GUARD_RE = re.compile(
+        r"""(?x)
+        (?:===|!==|==|!=|indexOf|includes|\bhas\b)\s*\(?\s*['"](?:__proto__|constructor|prototype)['"]
+        | ['"](?:__proto__|constructor|prototype)['"]\s*(?:===|!==|==|!=)
+        | \[[^\]]*['"](?:__proto__|constructor|prototype)['"][^\]]*\]
+        """)
+
+    def _scan_proto_pollution(self, root: TSNode, program: Program) -> None:
+        """Whole-file pass: flag an unguarded computed-property write
+        ``obj[key] = value`` whose key is attacker-influenced (a for-in/for-of
+        loop variable, a path element, or -- in library mode -- any non-constant
+        key). Prototype pollution (CWE-1321).
+
+        The precision lever mirrors how these CVEs are fixed: a function that
+        already checks the key against __proto__/constructor/prototype is treated
+        as guarded and not flagged."""
+        # Proto-awareness is a file-level signal: a patched module *checks* a key
+        # against __proto__/constructor/prototype (the guard often lives in a
+        # helper or a module-level denylist, not inline at the write).
+        self._proto_guarded = bool(self._PROTO_GUARD_RE.search(self._source))
+
+        hits = []
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(n.children)
+            if n.type != "assignment_expression":
+                continue
+            left = n.child_by_field_name("left")
+            if left is None or left.type != "subscript_expression":
+                continue
+            index = left.child_by_field_name("index")
+            if index is None or index.type in ("number", "string", "template_string"):
+                continue  # constant/numeric key cannot pollute the prototype
+
+            # Is the key attacker-influenced?
+            loop_vars = self._enclosing_loop_vars(n)
+            counter_vars = self._enclosing_c_for_vars(n)
+            key_txt = self._get_text(index)
+            params = self._enclosing_param_names(n)
+            if index.type == "identifier" and key_txt in counter_vars:
+                continue  # numeric C-style for-loop counter -> array index, safe
+            # A key that is itself a member/subscript access (obj[item.name],
+            # obj[a[i]]) is almost always benign map-building from internal data
+            # (serializing form fields, indexing by a record id), not prototype
+            # pollution, so it is NOT treated as suspicious on its own. Real
+            # pollution flows through a loop/path/param key that could be
+            # "__proto__"; attacker-controlled member keys are still caught by the
+            # taint-based sinks.
+            key_like = (
+                key_txt in loop_vars
+                or key_txt in params
+                or key_txt in self._enclosing_path_key_vars(n)
+            )
+            if not key_like:
+                continue
+
+            # Guarded? A patched setter checks the key against __proto__/
+            # constructor/prototype -- but the check often lives in a helper
+            # (isValidKey) or a module-level denylist rather than inline, so a
+            # reference anywhere in the file means the code is proto-aware.
+            if self._proto_guarded:
+                continue
+
+            hits.append(self._get_location(n))
+
+        self._emit_findings_proc(program, "<module-proto-pollution>",
+                                 "__proto_pollution__", hits)
+
+    def _enclosing_loop_vars(self, node: TSNode) -> set:
+        """Loop variables of every for-in / for-of enclosing `node`."""
+        names = set()
+        cur = node.parent
+        while cur is not None:
+            if cur.type in ("for_in_statement", "for_of_statement"):
+                left = cur.child_by_field_name("left")
+                if left is not None:
+                    names |= self._referenced_identifiers(left)
+            cur = cur.parent
+        return names
+
+    def _enclosing_path_key_vars(self, node: TSNode) -> set:
+        """Local variables in the enclosing function that hold a path/key element
+        -- assigned from an index expression (keys[i], a[n-1]) or a string split
+        (path.split('.')...). Such variables are the keys in nested setters like
+        obj[lastKey] = value, a common prototype-pollution shape."""
+        fn = self._nearest_enclosing_function(node)
+        if fn is None:
+            return set()
+        names = set()
+        stack = [fn]
+        while stack:
+            cur = stack.pop()
+            stack.extend(cur.children)
+            target = value = None
+            if cur.type == "variable_declarator":
+                target = cur.child_by_field_name("name")
+                value = cur.child_by_field_name("value")
+            elif cur.type == "assignment_expression":
+                target = cur.child_by_field_name("left")
+                value = cur.child_by_field_name("right")
+            if target is None or value is None or target.type != "identifier":
+                continue
+            vtext = self._get_text(value)
+            if (value.type == "subscript_expression"
+                    or ".split(" in vtext or ".shift(" in vtext or ".pop(" in vtext):
+                names.add(self._get_text(target))
+        return names
+
+    def _enclosing_c_for_vars(self, node: TSNode) -> set:
+        """Counter variables of enclosing C-style for-loops (for(i=0;...)) -- these
+        index numerically and never pollute a prototype."""
+        names = set()
+        cur = node.parent
+        while cur is not None:
+            if cur.type == "for_statement":
+                init = cur.child_by_field_name("initializer")
+                if init is not None:
+                    names |= self._referenced_identifiers(init)
+            cur = cur.parent
+        return names
+
+    def _nearest_enclosing_function(self, node: TSNode) -> Optional[TSNode]:
+        cur = node.parent
+        while cur is not None:
+            if cur.type in self._FUNC_LIKE:
+                return cur
+            cur = cur.parent
+        return None
+
+    def _emit_findings_proc(self, program: Program, name: str,
+                            sink_name: str, hits: list) -> None:
+        """Add a synthetic procedure holding one usage-sink Call per finding."""
+        if not hits:
+            return
+        proc = Procedure(name=name, params=[], ret_type=Typ.unknown_type(),
+                         loc=hits[0], is_method=False)
+        entry = proc.new_node(NodeKind.ENTRY)
+        proc.add_node(entry)
+        proc.entry_node = entry.id
+        for loc in hits:
+            entry.add_instr(Call(loc=loc, ret=None,
+                                 func=ExpConst.string(sink_name), args=[]))
+        exit_node = proc.new_node(NodeKind.EXIT)
+        proc.add_node(exit_node)
+        proc.exit_node = exit_node.id
+        proc.connect(entry.id, exit_node.id)
+        program.add_procedure(proc)
+
+    def _request_derived_names(self, func_node: TSNode) -> set:
+        """Names in a function that are request-derived: destructured request
+        properties plus locals initialized from a request source (small fixpoint).
+        These are the values whose interprocedural flow we track."""
+        names = set(self._express_request_source_names(func_node))
+        body = func_node.child_by_field_name("body")
+        if body is None:
+            return names
+        for _ in range(4):
+            added = False
+            stack = [body]
+            while stack:
+                c = stack.pop()
+                if c.type == "variable_declarator":
+                    nm = c.child_by_field_name("name")
+                    init = c.child_by_field_name("value")
+                    if (nm is not None and nm.type == "identifier" and init is not None):
+                        name = self._get_text(nm)
+                        if name not in names:
+                            chain = self._get_member_chain(init)
+                            refs = self._referenced_identifiers(init)
+                            if ((chain and (chain.startswith("req.") or chain.startswith("request.")))
+                                    or (refs & names)):
+                                names.add(name)
+                                added = True
+                stack.extend(c.children)
+            if not added:
+                break
+        return names
+
+    def _collect_js_calls(self, node: TSNode, calls: list) -> None:
+        """Collect bare-identifier calls: (callee_name, [ids-per-arg])."""
+        if node.type == "call_expression":
+            fn = node.child_by_field_name("function")
+            if fn is not None and fn.type == "identifier":
+                callee = self._get_text(fn)
+                args = node.child_by_field_name("arguments")
+                arg_ids = []
+                if args is not None:
+                    for a in args.children:
+                        if a.type in ("(", ")", ","):
+                            continue
+                        arg_ids.append(self._referenced_identifiers(a))
+                calls.append((callee, arg_ids))
+        for ch in node.children:
+            self._collect_js_calls(ch, calls)
+
+    def _propagate_js_interprocedural(self, root: TSNode, program: Program) -> None:
+        """Taint a same-file function's parameter when a caller passes it a
+        request-derived value (one hop). Mirrors the Java pass; recovers e.g.
+        `verify(file)` where a handler derived `file` from the request."""
+        procs_by_name: Dict[str, Any] = {}
+        for p in program.procedures.values():
+            procs_by_name.setdefault(p.name, p)
+            procs_by_name.setdefault(p.name.split(".")[-1], p)
+
+        func_nodes = []
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            if n.type in self._FUNC_LIKE:
+                func_nodes.append(n)
+            stack.extend(n.children)
+
+        to_taint: Dict[str, set] = {}
+        for fn in func_nodes:
+            derived = self._request_derived_names(fn)
+            if not derived:
+                continue
+            body = fn.child_by_field_name("body")
+            if body is None:
+                continue
+            calls: list = []
+            self._collect_js_calls(body, calls)
+            for callee, arg_ids in calls:
+                cproc = procs_by_name.get(callee)
+                if cproc is None:
+                    continue
+                for j, ids in enumerate(arg_ids):
+                    if (ids & derived) and j < len(cproc.params):
+                        to_taint.setdefault(cproc.name, set()).add(j)
+
+        for pname, idxs in to_taint.items():
+            proc = procs_by_name.get(pname)
+            if proc is None or proc.entry_node is None:
+                continue
+            entry = proc.nodes.get(proc.entry_node)
+            if entry is None:
+                continue
+            for j in sorted(idxs):
+                if j >= len(proc.params):
+                    continue
+                pv = proc.params[j][0]
+                entry.instrs.insert(0, TaintSource(
+                    loc=proc.loc, var=pv, kind=TaintKind.USER_INPUT,
+                    description="Interprocedural: request-derived argument from caller"))
+
+    def _func_param_names(self, func_node: TSNode) -> set:
+        """Identifier names of a function node's formal parameters."""
+        names = set()
+        params = func_node.child_by_field_name("parameters")
+        if params is not None:
+            for child in params.children:
+                if child.type == "identifier":
+                    names.add(self._get_text(child))
+                elif child.type in ("required_parameter", "optional_parameter"):
+                    pat = child.child_by_field_name("pattern")
+                    if pat is not None:
+                        names.add(self._get_text(pat))
+                elif child.type == "assignment_pattern":
+                    left = child.child_by_field_name("left")
+                    if left is not None:
+                        names.add(self._get_text(left))
+        else:
+            # Arrow with a single bare identifier parameter: x => ...
+            for child in func_node.children:
+                if child.type == "identifier":
+                    names.add(self._get_text(child))
+                    break
+        return names
+
+    def _enclosing_param_names(self, node: TSNode) -> set:
+        """Parameter names of every function lexically enclosing `node`."""
+        names = set()
+        cur = node.parent
+        while cur is not None:
+            if cur.type in self._FUNC_LIKE:
+                names |= self._func_param_names(cur)
+            cur = cur.parent
+        return names
+
+    def _enclosing_local_names(self, node: TSNode) -> set:
+        """Local (var/let/const) names declared in functions enclosing `node`.
+        These are captured free variables in a nested function; in library mode
+        an outer local often holds attacker-derived data (e.g. a filepath built
+        from req.url) that flows into a sink several callbacks deep."""
+        names = set()
+        cur = node.parent
+        while cur is not None:
+            if cur.type in self._FUNC_LIKE:
+                body = cur.child_by_field_name("body")
+                if body is not None:
+                    stack = [body]
+                    while stack:
+                        c = stack.pop()
+                        if c.type == "variable_declarator":
+                            nm = c.child_by_field_name("name")
+                            if nm is not None and nm.type == "identifier":
+                                names.add(self._get_text(nm))
+                        stack.extend(c.children)
+            cur = cur.parent
+        return names
+
+    def _enclosing_request_derived_locals(self, node: TSNode) -> set:
+        """Enclosing-function locals whose initializer is request-derived.
+
+        A local is request-derived if its initializer references `req.`/`request.`,
+        a destructured request property bound in the same function, or another
+        request-derived local (small fixpoint). These stay tainted when captured
+        by a nested callback -- without tainting every captured name.
+        """
+        names: set = set()
+        cur = node.parent
+        while cur is not None:
+            if cur.type in self._FUNC_LIKE:
+                req_names = set(self._express_request_source_names(cur))
+                body = cur.child_by_field_name("body")
+                if body is not None:
+                    for _ in range(4):  # fixpoint for chained locals
+                        added = False
+                        stack = [body]
+                        while stack:
+                            c = stack.pop()
+                            if c.type == "variable_declarator":
+                                nm = c.child_by_field_name("name")
+                                init = c.child_by_field_name("value")
+                                if (nm is not None and nm.type == "identifier"
+                                        and init is not None):
+                                    name = self._get_text(nm)
+                                    if name not in req_names:
+                                        refs = self._referenced_identifiers(init)
+                                        chain = self._get_member_chain(init)
+                                        if ((chain and (chain.startswith("req.")
+                                                        or chain.startswith("request.")))
+                                                or (refs & req_names)
+                                                or ("req" in refs) or ("request" in refs)):
+                                            req_names.add(name)
+                                            added = True
+                            stack.extend(c.children)
+                        if not added:
+                            break
+                names |= req_names
+            cur = cur.parent
+        return names
+
+    def _referenced_identifiers(self, node: TSNode) -> set:
+        """All identifier names referenced in a subtree (bounded walk)."""
+        refs = set()
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if cur.type in ("identifier", "shorthand_property_identifier"):
+                refs.add(self._get_text(cur))
+            stack.extend(cur.children)
+        return refs
+
+    # Express Request properties that carry attacker-controlled data.
+    _REQUEST_PROPS = {"body", "params", "query", "cookies", "headers", "file",
+                      "files", "param", "session", "signedCookies"}
+
+    def _express_request_source_names(self, node: TSNode) -> set:
+        """Names bound by destructuring an Express Request handler parameter.
+
+        Recognizes handlers like ``({ body, params, query }: Request, res, next)``
+        -- returns the destructured request-property names so they can be marked
+        as taint sources. Only fires when the function looks like a request
+        handler (a `Request`-typed param, or a sibling `res`/`response`/`next`),
+        keeping it precise.
+        """
+        params_node = node.child_by_field_name("parameters")
+        if params_node is not None:
+            param_children = list(params_node.children)
+        else:
+            single = node.child_by_field_name("parameter")
+            param_children = [single] if single is not None else []
+
+        destructured: List[TSNode] = []
+        is_handler = False
+        for ch in param_children:
+            if ch.type == "identifier":
+                if self._get_text(ch) in ("res", "response", "next"):
+                    is_handler = True
+            elif ch.type in ("required_parameter", "optional_parameter"):
+                typ = ch.child_by_field_name("type")
+                if typ is not None and "Request" in self._get_text(typ):
+                    is_handler = True
+                pat = ch.child_by_field_name("pattern")
+                if pat is not None and pat.type == "object_pattern":
+                    destructured.append(pat)
+                elif pat is not None and pat.type == "identifier" and \
+                        self._get_text(pat) in ("res", "response", "next"):
+                    is_handler = True
+            elif ch.type == "object_pattern":
+                destructured.append(ch)
+
+        if not is_handler:
+            return set()
+        names: set = set()
+        for pat in destructured:
+            for c in pat.children:
+                nm = None
+                if c.type == "shorthand_property_identifier_pattern":
+                    nm = self._get_text(c)
+                elif c.type == "pair_pattern":
+                    v = c.child_by_field_name("value")
+                    if v is not None:
+                        nm = self._get_text(v)
+                if nm and nm in self._REQUEST_PROPS:
+                    names.add(nm)
+        return names
+
+    def _translate_parameters(self, node: TSNode) -> List[Tuple[PVar, Typ]]:
+        """Translate function parameters"""
+        params = []
+        for child in node.children:
+            if child.type == "identifier":
+                param_name = self._get_text(child)
+                params.append((PVar(param_name), Typ.unknown_type()))
+
+            elif child.type == "required_parameter" or child.type == "optional_parameter":
+                # TypeScript parameter
+                pattern = child.child_by_field_name("pattern")
+                if pattern:
+                    param_name = self._get_text(pattern)
+                    params.append((PVar(param_name), Typ.unknown_type()))
+
+            elif child.type == "assignment_pattern":
+                # Default parameter: name = value
+                left = child.child_by_field_name("left")
+                if left:
+                    param_name = self._get_text(left)
+                    params.append((PVar(param_name), Typ.unknown_type()))
+
+            elif child.type == "rest_pattern":
+                # ...args
+                for c in child.children:
+                    if c.type == "identifier":
+                        param_name = self._get_text(c)
+                        params.append((PVar(param_name), Typ.list_of(Typ.unknown_type())))
+
+            elif child.type == "object_pattern":
+                # Destructured parameter: { a, b }
+                for c in child.children:
+                    if c.type == "shorthand_property_identifier_pattern":
+                        param_name = self._get_text(c)
+                        params.append((PVar(param_name), Typ.unknown_type()))
+                    elif c.type == "pair_pattern":
+                        value = c.child_by_field_name("value")
+                        if value:
+                            param_name = self._get_text(value)
+                            params.append((PVar(param_name), Typ.unknown_type()))
+
+        return params
+
+    def _translate_block(self, node: TSNode) -> None:
+        """Translate a block of statements"""
+        for child in node.children:
+            if child.type not in ("{", "}"):
+                self._translate_statement(child)
+
+    def _translate_statement(self, node: TSNode) -> None:
+        """Translate a single statement"""
+        if node.type == "expression_statement":
+            self._translate_expression_statement(node)
+
+        elif node.type == "lexical_declaration" or node.type == "variable_declaration":
+            self._translate_var_declaration(node)
+
+        elif node.type == "return_statement":
+            self._translate_return(node)
+
+        elif node.type == "if_statement":
+            self._translate_if(node)
+
+        elif node.type == "while_statement":
+            self._translate_while(node)
+
+        elif node.type == "for_statement":
+            self._translate_for(node)
+
+        elif node.type == "for_in_statement" or node.type == "for_of_statement":
+            self._translate_for_in(node)
+
+        elif node.type == "try_statement":
+            self._translate_try(node)
+
+        elif node.type == "switch_statement":
+            self._translate_switch(node)
+
+        elif node.type == "throw_statement":
+            self._translate_throw(node)
+
+    def _translate_expression_statement(self, node: TSNode) -> None:
+        """Translate expression statement"""
+        for child in node.children:
+            if child.type == "call_expression":
+                instrs = self._translate_call_expr(child)
+                self._add_instrs(instrs)
+
+            elif child.type == "assignment_expression":
+                self._translate_assignment(child)
+
+            elif child.type == "update_expression":
+                self._translate_update(child)
+
+            elif child.type == "augmented_assignment_expression":
+                self._translate_augmented_assignment(child)
+
+            elif child.type == "new_expression":
+                # A bare `new Function(userCode)` statement is a sink; translating
+                # the expression emits the TaintSink as a side effect.
+                self._translate_expression(child)
+
+    def _translate_var_declaration(self, node: TSNode) -> None:
+        """Translate variable declaration: const/let/var x = value"""
+        for child in node.children:
+            if child.type == "variable_declarator":
+                name_node = child.child_by_field_name("name")
+                value_node = child.child_by_field_name("value")
+
+                if not name_node:
+                    continue
+
+                target_name = self._get_text(name_node)
+                loc = self._get_location(child)
+
+                if value_node:
+                    if value_node.type == "call_expression":
+                        instrs = self._translate_call_assignment(target_name, value_node, loc)
+                        self._add_instrs(instrs)
+                    elif value_node.type == "template_string":
+                        instrs = self._translate_template_assignment(target_name, value_node, loc)
+                        self._add_instrs(instrs)
+                    else:
+                        exp = self._translate_expression(value_node)
+                        self._add_instr(Assign(loc=loc, id=PVar(target_name), exp=exp))
+                        # Check if this is a property access that's a taint source
+                        taint_instrs = self._check_expression_for_taint_source(value_node, target_name, loc)
+                        self._add_instrs(taint_instrs)
+                else:
+                    # Uninitialized variable
+                    self._add_instr(Assign(loc=loc, id=PVar(target_name), exp=ExpConst.null()))
+
+    def _translate_assignment(self, node: TSNode) -> None:
+        """Translate assignment expression: target = value"""
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+
+        if not left or not right:
+            return
+
+        target_name = self._get_text(left)
+        loc = self._get_location(node)
+
+        if right.type == "call_expression":
+            instrs = self._translate_call_assignment(target_name, right, loc)
+            self._add_instrs(instrs)
+        elif right.type == "template_string":
+            instrs = self._translate_template_assignment(target_name, right, loc)
+            self._add_instrs(instrs)
+        else:
+            exp = self._translate_expression(right)
+            self._add_instr(Assign(loc=loc, id=PVar(target_name), exp=exp))
+            # Check if this expression contains a taint source
+            taint_instrs = self._check_expression_for_taint_source(right, target_name, loc)
+            self._add_instrs(taint_instrs)
+
+        # Assignment to a sink property (e.g. `el.innerHTML = x`, `script.src = x`)
+        # flows the right-hand value into a taint sink. We sink on the assigned
+        # target, which carries the right-hand side's taint via the source check
+        # above (inline sources) or assignment propagation (already-tainted
+        # vars). The taint engine then reports it only when that value is
+        # actually attacker-tainted; a constant right-hand side stays untainted.
+        sink_spec = self._assignment_sink_spec(left)
+        if sink_spec:
+            self._add_instr(TaintSink(
+                loc=loc,
+                exp=ExpVar(PVar(target_name)),
+                kind=_get_sink_kind(sink_spec.is_sink),
+                description=sink_spec.description,
+            ))
+
+    def _assignment_sink_spec(self, left_node: TSNode):
+        """Return the sink ProcSpec if an assignment target is a known sink
+        property (e.g. ``el.innerHTML``, ``script.src``), else None.
+
+        Matches the full member chain, its suffixes, and the bare property
+        name against the taint specs (mirroring call-sink suffix matching).
+        """
+        if left_node is None or left_node.type != "member_expression":
+            return None
+
+        prop_node = left_node.child_by_field_name("property")
+        prop_name = self._get_text(prop_node) if prop_node else ""
+        chain = self._get_member_chain(left_node) or ""
+
+        candidates = [chain]
+        if "." in chain:
+            parts = chain.split(".")
+            candidates += [".".join(parts[i:]) for i in range(1, len(parts))]
+        candidates.append(prop_name)
+
+        for key in candidates:
+            spec = self.specs.get(key)
+            if spec and spec.is_taint_sink():
+                return spec
+        return None
+
+    def _translate_call_assignment(
+        self,
+        target: str,
+        call_node: TSNode,
+        loc: Location
+    ) -> List[Instr]:
+        """Translate: target = func(args)"""
+        instrs = []
+
+        func_name = self._get_call_name(call_node)
+        args = self._get_call_args(call_node)
+        args_exp = [(self._translate_expression(a), Typ.unknown_type()) for a in args]
+
+        # Create return identifier
+        ret_id = self._new_ident(target)
+
+        # Build Call instruction
+        call_instr = Call(
+            loc=loc,
+            ret=(ret_id, Typ.unknown_type()),
+            func=ExpConst.string(func_name),
+            args=args_exp
+        )
+        instrs.append(call_instr)
+
+        # Assign to target
+        instrs.append(Assign(
+            loc=loc,
+            id=PVar(target),
+            exp=ExpVar(ret_id)
+        ))
+
+        # Check if this is a taint source
+        spec = self.specs.get(func_name)
+        if spec and spec.is_taint_source():
+            kind = TaintKind(spec.is_source) if spec.is_source in [t.value for t in TaintKind] else TaintKind.USER_INPUT
+            instrs.append(TaintSource(
+                loc=loc,
+                var=PVar(target),
+                kind=kind,
+                description=spec.description
+            ))
+
+        # Check if this is a sink
+        if spec and spec.is_taint_sink():
+            kind = _get_sink_kind(spec.is_sink)
+            for arg_idx in spec.sink_args:
+                if arg_idx < len(args):
+                    arg_exp = self._translate_expression(args[arg_idx])
+                    instrs.append(TaintSink(
+                        loc=loc,
+                        exp=arg_exp,
+                        kind=kind,
+                        description=spec.description
+                    ))
+
+        return instrs
+
+    def _translate_call_expr(self, call_node: TSNode) -> List[Instr]:
+        """Translate standalone call: func(args)
+
+        Handles chained method calls like: query(...).then(...).catch(...)
+        Each call in the chain is translated separately.
+        """
+        instrs = []
+        loc = self._get_location(call_node)
+
+        # Get the function node
+        func_node = call_node.child_by_field_name("function")
+
+        # Check if this is a chained method call (e.g., query(...).then(...))
+        if func_node and func_node.type == "member_expression":
+            obj_node = func_node.child_by_field_name("object")
+            prop_node = func_node.child_by_field_name("property")
+
+            # If the object is a call_expression, translate it first
+            if obj_node and obj_node.type == "call_expression":
+                # Recursively translate the inner call
+                inner_instrs = self._translate_call_expr(obj_node)
+                instrs.extend(inner_instrs)
+
+                # Now translate this call with just the method name
+                method_name = self._get_text(prop_node) if prop_node else ""
+                func_name = method_name
+            else:
+                # Regular method call (e.g., obj.method())
+                func_name = self._get_call_name(call_node)
+        else:
+            # Simple function call
+            func_name = self._get_call_name(call_node)
+
+        args = self._get_call_args(call_node)
+        args_exp = [(self._translate_expression(a), Typ.unknown_type()) for a in args]
+
+        # Build Call instruction
+        call_instr = Call(
+            loc=loc,
+            ret=None,
+            func=ExpConst.string(func_name),
+            args=args_exp
+        )
+        instrs.append(call_instr)
+
+        # Check if this is a sink (with suffix matching for chained calls)
+        spec = self.specs.get(func_name)
+        if not spec and '.' in func_name:
+            # Try suffix matching: models.sequelize.query -> sequelize.query
+            parts = func_name.split('.')
+            for i in range(1, len(parts)):
+                suffix = '.'.join(parts[i:])
+                spec = self.specs.get(suffix)
+                if spec:
+                    break
+
+        if spec and spec.is_taint_sink():
+            kind = _get_sink_kind(spec.is_sink)
+            for arg_idx in spec.sink_args:
+                if arg_idx < len(args):
+                    arg_exp = self._translate_expression(args[arg_idx])
+                    instrs.append(TaintSink(
+                        loc=loc,
+                        exp=arg_exp,
+                        kind=kind,
+                        description=spec.description,
+                        arg_index=arg_idx
+                    ))
+
+        return instrs
+
+    def _emit_nested_call_sink(self, call_node: TSNode, args: List[Exp]) -> None:
+        """Emit a TaintSink for a call appearing inside a larger expression
+        (return value, argument, concatenation) so nested sinks like
+        `return eval(x)` are not lost. Standalone-statement calls go through
+        _translate_call_expr instead, so this avoids double emission."""
+        func_name = self._get_call_name(call_node)
+        spec = self.specs.get(func_name)
+        if not spec and '.' in func_name:
+            parts = func_name.split('.')
+            for i in range(1, len(parts)):
+                spec = self.specs.get('.'.join(parts[i:]))
+                if spec:
+                    break
+        if spec and spec.is_taint_sink():
+            kind = _get_sink_kind(spec.is_sink)
+            loc = self._get_location(call_node)
+            for arg_idx in spec.sink_args:
+                if arg_idx < len(args):
+                    self._add_instr(TaintSink(
+                        loc=loc, exp=args[arg_idx], kind=kind,
+                        description=spec.description, arg_index=arg_idx))
+
+    def _translate_template_assignment(
+        self,
+        target: str,
+        template_node: TSNode,
+        loc: Location
+    ) -> List[Instr]:
+        """Translate template string assignment"""
+        instrs = []
+        parts = self._extract_template_parts(template_node)
+
+        if parts:
+            concat_exp = ExpStringConcat(parts)
+            instrs.append(Assign(loc=loc, id=PVar(target), exp=concat_exp))
+        else:
+            instrs.append(Assign(loc=loc, id=PVar(target), exp=ExpConst.string("")))
+
+        return instrs
+
+    def _extract_template_parts(self, node: TSNode) -> List[Exp]:
+        """Extract parts from template string"""
+        parts = []
+
+        for child in node.children:
+            if child.type == "string_fragment":
+                text = self._get_text(child)
+                parts.append(ExpConst.string(text))
+            elif child.type == "template_substitution":
+                # ${expr}
+                for c in child.children:
+                    if c.type not in ("${", "}"):
+                        exp = self._translate_expression(c)
+                        parts.append(exp)
+
+        return parts
+
+    def _translate_augmented_assignment(self, node: TSNode) -> None:
+        """Translate augmented assignment: x += y"""
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        op_node = node.child_by_field_name("operator")
+
+        if not left or not right:
+            return
+
+        target_name = self._get_text(left)
+        loc = self._get_location(node)
+
+        op = self._get_text(op_node) if op_node else "+="
+        bin_op = op[:-1] if op.endswith("=") else "+"
+
+        left_exp = ExpVar(PVar(target_name))
+        right_exp = self._translate_expression(right)
+        combined = ExpBinOp(bin_op, left_exp, right_exp)
+
+        self._add_instr(Assign(loc=loc, id=PVar(target_name), exp=combined))
+
+    def _translate_update(self, node: TSNode) -> None:
+        """Translate update expression: x++ or ++x"""
+        loc = self._get_location(node)
+        arg = node.child_by_field_name("argument")
+        op = node.child_by_field_name("operator")
+
+        if not arg:
+            return
+
+        var_name = self._get_text(arg)
+        op_text = self._get_text(op) if op else "++"
+        bin_op = "+" if "++" in op_text else "-"
+
+        self._add_instr(Assign(
+            loc=loc,
+            id=PVar(var_name),
+            exp=ExpBinOp(bin_op, ExpVar(PVar(var_name)), ExpConst.integer(1))
+        ))
+
+    def _translate_return(self, node: TSNode) -> None:
+        """Translate return statement"""
+        loc = self._get_location(node)
+        value_exp = None
+
+        for child in node.children:
+            if child.type not in ("return", ";"):
+                # Check if returning an arrow function - inline its body
+                if child.type == "arrow_function" or child.type == "function":
+                    # Get the arrow function's body and translate it inline
+                    body_node = child.child_by_field_name("body")
+                    if body_node:
+                        if body_node.type == "statement_block":
+                            self._translate_block(body_node)
+                        else:
+                            # Expression body: () => expr
+                            exp = self._translate_expression(body_node)
+                            self._add_instr(Return(loc=self._get_location(body_node), value=exp))
+                    return  # Don't add another return statement
+                else:
+                    value_exp = self._translate_expression(child)
+                break
+
+        self._add_instr(Return(loc=loc, value=value_exp))
+
+    def _translate_if(self, node: TSNode) -> None:
+        """Translate if statement"""
+        loc = self._get_location(node)
+        proc = self._current_proc
+        if not proc:
+            return
+
+        condition = node.child_by_field_name("condition")
+        condition_exp = self._translate_expression(condition) if condition else ExpConst.boolean(True)
+
+        before_node = self._current_node
+
+        true_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(true_node)
+
+        false_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(false_node)
+
+        join_node = proc.new_node(NodeKind.JOIN)
+        proc.add_node(join_node)
+
+        if before_node:
+            before_node.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=True))
+            proc.connect(before_node.id, true_node.id)
+
+            before_node.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=False))
+            proc.connect(before_node.id, false_node.id)
+
+        # Translate consequence
+        consequence = node.child_by_field_name("consequence")
+        if consequence:
+            self._current_node = true_node
+            if consequence.type == "statement_block":
+                self._translate_block(consequence)
+            else:
+                self._translate_statement(consequence)
+            if self._current_node:
+                proc.connect(self._current_node.id, join_node.id)
+
+        # Translate alternative
+        alternative = node.child_by_field_name("alternative")
+        if alternative:
+            self._current_node = false_node
+            if alternative.type == "else_clause":
+                for child in alternative.children:
+                    if child.type not in ("else",):
+                        if child.type == "statement_block":
+                            self._translate_block(child)
+                        else:
+                            self._translate_statement(child)
+            elif alternative.type == "if_statement":
+                self._translate_if(alternative)
+            if self._current_node:
+                proc.connect(self._current_node.id, join_node.id)
+        else:
+            proc.connect(false_node.id, join_node.id)
+
+        self._current_node = join_node
+
+    def _translate_while(self, node: TSNode) -> None:
+        """Translate while loop"""
+        proc = self._current_proc
+        if not proc:
+            return
+
+        loc = self._get_location(node)
+
+        condition = node.child_by_field_name("condition")
+        condition_exp = self._translate_expression(condition) if condition else ExpConst.boolean(True)
+
+        before_node = self._current_node
+
+        loop_head = proc.new_node(NodeKind.LOOP_HEAD)
+        proc.add_node(loop_head)
+
+        # `break` has no SIL representation, so record here, the only place the
+        # loop's parse tree is still available, whether any statement in the body
+        # can transfer control out of the loop. The translator pairs this with the
+        # loop condition to decide whether the loop can terminate at all.
+        loop_head.loop_body_can_exit = body_can_exit_loop(node.child_by_field_name("body"))
+
+        body_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(body_node)
+
+        after_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(after_node)
+
+        if before_node:
+            proc.connect(before_node.id, loop_head.id)
+
+        loop_head.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=True, kind=PruneKind.LOOP_ENTER))
+        proc.connect(loop_head.id, body_node.id)
+
+        loop_head.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=False, kind=PruneKind.LOOP_EXIT))
+        proc.connect(loop_head.id, after_node.id)
+
+        body = node.child_by_field_name("body")
+        if body:
+            self._current_node = body_node
+            if body.type == "statement_block":
+                self._translate_block(body)
+            else:
+                self._translate_statement(body)
+
+        if self._current_node:
+            proc.connect(self._current_node.id, loop_head.id)
+
+        self._current_node = after_node
+
+    def _translate_for(self, node: TSNode) -> None:
+        """Translate for loop"""
+        proc = self._current_proc
+        if not proc:
+            return
+
+        loc = self._get_location(node)
+
+        # Initialize
+        init = node.child_by_field_name("initializer")
+        if init:
+            if init.type in ("lexical_declaration", "variable_declaration"):
+                self._translate_var_declaration(init)
+            elif init.type == "assignment_expression":
+                self._translate_assignment(init)
+
+        # Simplified loop translation
+        before_node = self._current_node
+
+        loop_head = proc.new_node(NodeKind.LOOP_HEAD)
+        proc.add_node(loop_head)
+
+        body_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(body_node)
+
+        after_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(after_node)
+
+        if before_node:
+            proc.connect(before_node.id, loop_head.id)
+
+        condition = node.child_by_field_name("condition")
+        condition_exp = self._translate_expression(condition) if condition else ExpConst.boolean(True)
+
+        loop_head.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=True, kind=PruneKind.FOR_ENTER))
+        proc.connect(loop_head.id, body_node.id)
+
+        loop_head.add_instr(Prune(loc=loc, condition=condition_exp, is_true_branch=False, kind=PruneKind.FOR_EXIT))
+        proc.connect(loop_head.id, after_node.id)
+
+        body = node.child_by_field_name("body")
+        if body:
+            self._current_node = body_node
+            if body.type == "statement_block":
+                self._translate_block(body)
+            else:
+                self._translate_statement(body)
+
+        # Update
+        update = node.child_by_field_name("increment")
+        if update and self._current_node:
+            if update.type == "update_expression":
+                self._translate_update(update)
+            elif update.type == "assignment_expression":
+                self._translate_assignment(update)
+
+        if self._current_node:
+            proc.connect(self._current_node.id, loop_head.id)
+
+        self._current_node = after_node
+
+    def _translate_for_in(self, node: TSNode) -> None:
+        """Translate for-in/for-of loop"""
+        proc = self._current_proc
+        if not proc:
+            return
+
+        loc = self._get_location(node)
+
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+
+        loop_var = self._get_text(left) if left else "_iter"
+        iterable_exp = self._translate_expression(right) if right else ExpConst.null()
+
+        before_node = self._current_node
+
+        loop_head = proc.new_node(NodeKind.LOOP_HEAD)
+        proc.add_node(loop_head)
+
+        body_node = proc.new_node(NodeKind.NORMAL)
+        body_node.add_instr(Assign(
+            loc=loc,
+            id=PVar(loop_var),
+            exp=ExpCall(ExpConst.string("next"), [iterable_exp])
+        ))
+        proc.add_node(body_node)
+
+        after_node = proc.new_node(NodeKind.NORMAL)
+        proc.add_node(after_node)
+
+        if before_node:
+            proc.connect(before_node.id, loop_head.id)
+
+        cond = ExpConst.boolean(True)
+        loop_head.add_instr(Prune(loc=loc, condition=cond, is_true_branch=True, kind=PruneKind.FOR_ENTER))
+        proc.connect(loop_head.id, body_node.id)
+
+        loop_head.add_instr(Prune(loc=loc, condition=cond, is_true_branch=False, kind=PruneKind.FOR_EXIT))
+        proc.connect(loop_head.id, after_node.id)
+
+        body = node.child_by_field_name("body")
+        if body:
+            self._current_node = body_node
+            if body.type == "statement_block":
+                self._translate_block(body)
+            else:
+                self._translate_statement(body)
+
+        if self._current_node:
+            proc.connect(self._current_node.id, loop_head.id)
+
+        self._current_node = after_node
+
+    def _translate_try(self, node: TSNode) -> None:
+        """Translate try/catch/finally"""
+        # The handler's control flow is not modelled below, so record that this
+        # procedure's CFG understates how control can leave it.
+        if self._current_proc:
+            self._current_proc.has_exception_handler = True
+
+        body = node.child_by_field_name("body")
+        if body:
+            self._translate_block(body)
+
+        handler = node.child_by_field_name("handler")
+        if handler:
+            handler_body = handler.child_by_field_name("body")
+            if handler_body:
+                self._translate_block(handler_body)
+
+        finalizer = node.child_by_field_name("finalizer")
+        if finalizer:
+            self._translate_block(finalizer)
+
+    def _translate_switch(self, node: TSNode) -> None:
+        """Translate switch statement (simplified)"""
+        body = node.child_by_field_name("body")
+        if body:
+            for child in body.children:
+                if child.type == "switch_case" or child.type == "switch_default":
+                    for stmt in child.children:
+                        if stmt.type not in ("case", "default", ":", "break_statement"):
+                            self._translate_statement(stmt)
+
+    def _translate_throw(self, node: TSNode) -> None:
+        """Translate throw statement"""
+        loc = self._get_location(node)
+        # Simplified: just mark as potential error
+        for child in node.children:
+            if child.type not in ("throw", ";"):
+                exp = self._translate_expression(child)
+                self._add_instr(Return(loc=loc, value=exp))
+                break
+
+    def _translate_expression(self, node: TSNode) -> Exp:
+        """Translate expression to SIL Exp"""
+        if node is None:
+            return ExpConst.null()
+
+        if node.type == "identifier":
+            name = self._get_text(node)
+            return ExpVar(PVar(name))
+
+        elif node.type == "number":
+            text = self._get_text(node)
+            try:
+                if "." in text:
+                    return ExpConst.integer(int(float(text)))
+                else:
+                    return ExpConst.integer(int(text, 0))
+            except ValueError:
+                return ExpConst.integer(0)
+
+        elif node.type == "string":
+            text = self._get_string_content(node)
+            return ExpConst.string(text)
+
+        elif node.type == "template_string":
+            parts = self._extract_template_parts(node)
+            if parts:
+                return ExpStringConcat(parts)
+            return ExpConst.string("")
+
+        elif node.type == "true":
+            return ExpConst.boolean(True)
+
+        elif node.type == "false":
+            return ExpConst.boolean(False)
+
+        elif node.type in ("null", "undefined"):
+            return ExpConst.null()
+
+        elif node.type == "binary_expression":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            op_node = node.child_by_field_name("operator")
+
+            left_exp = self._translate_expression(left)
+            right_exp = self._translate_expression(right)
+            op = self._get_text(op_node) if op_node else "+"
+
+            if op == "+":
+                return ExpStringConcat([left_exp, right_exp])
+
+            return ExpBinOp(op, left_exp, right_exp)
+
+        elif node.type == "unary_expression":
+            op_node = node.child_by_field_name("operator")
+            arg = node.child_by_field_name("argument")
+            op = self._get_text(op_node) if op_node else "-"
+            arg_exp = self._translate_expression(arg)
+            return ExpUnOp(op, arg_exp)
+
+        elif node.type == "member_expression":
+            obj = node.child_by_field_name("object")
+            prop = node.child_by_field_name("property")
+            obj_exp = self._translate_expression(obj)
+            prop_name = self._get_text(prop) if prop else ""
+            return ExpFieldAccess(obj_exp, prop_name)
+
+        elif node.type == "subscript_expression":
+            obj = node.child_by_field_name("object")
+            index = node.child_by_field_name("index")
+            obj_exp = self._translate_expression(obj)
+            index_exp = self._translate_expression(index)
+            return ExpIndex(obj_exp, index_exp)
+
+        elif node.type == "call_expression":
+            func = node.child_by_field_name("function")
+            func_exp = self._translate_expression(func)
+            args = []
+            args_node = node.child_by_field_name("arguments")
+            if args_node:
+                for child in args_node.children:
+                    if child.type not in ("(", ")", ","):
+                        args.append(self._translate_expression(child))
+            # A call nested inside another expression (e.g. `return eval(x)`,
+            # `f(exec(y))`) is still a sink -- emit its TaintSink as a side effect
+            # so it is not missed just because it is not a standalone statement.
+            self._emit_nested_call_sink(node, args)
+            return ExpCall(func_exp, args)
+
+        elif node.type == "regex":
+            # ReDoS is detected by a dedicated whole-file pass (_scan_redos), so
+            # module-level regex constants are covered too; here just yield the
+            # literal as an opaque string value.
+            pat_node = node.child_by_field_name("pattern")
+            pattern = self._get_text(pat_node) if pat_node else ""
+            return ExpConst.string(f"/{pattern}/")
+
+        elif node.type == "parenthesized_expression":
+            for child in node.children:
+                if child.type not in ("(", ")"):
+                    return self._translate_expression(child)
+
+        elif node.type == "array":
+            elements = []
+            for child in node.children:
+                if child.type not in ("[", "]", ","):
+                    elements.append(self._translate_expression(child))
+            return elements[0] if elements else ExpConst.null()
+
+        elif node.type == "object":
+            # Aggregate the property values so taint flows through an object,
+            # e.g. User.find({ $where: req.body.q }) or res.json(req.body).
+            parts = []
+            for child in node.children:
+                if child.type == "pair":
+                    val = child.child_by_field_name("value")
+                    if val is not None:
+                        parts.append(self._translate_expression(val))
+                elif child.type in ("shorthand_property_identifier",
+                                    "shorthand_property_identifier_pattern"):
+                    parts.append(ExpVar(PVar(self._get_text(child))))
+                elif child.type == "spread_element":
+                    for c in child.children:
+                        if c.type not in ("...",):
+                            parts.append(self._translate_expression(c))
+            if not parts:
+                return ExpConst.null()
+            return ExpStringConcat(parts) if len(parts) > 1 else parts[0]
+
+        elif node.type == "ternary_expression" or node.type == "conditional_expression":
+            # condition ? true : false
+            # For taint tracking, we need to consider both branches
+            # Simplified: prefer alternative if it looks like a taint source, otherwise consequence
+            cond = node.child_by_field_name("condition")
+            conseq = node.child_by_field_name("consequence")
+            alt = node.child_by_field_name("alternative")
+
+            # Check if alternative contains a taint source pattern
+            alt_chain = self._get_member_chain(alt) if alt else ""
+            if alt_chain and any(alt_chain.startswith(src) for src in ["req.", "request."]):
+                return self._translate_expression(alt) if alt else ExpConst.null()
+
+            # Check if consequence contains a taint source pattern
+            conseq_chain = self._get_member_chain(conseq) if conseq else ""
+            if conseq_chain and any(conseq_chain.startswith(src) for src in ["req.", "request."]):
+                return self._translate_expression(conseq) if conseq else ExpConst.null()
+
+            # Default: return consequence
+            return self._translate_expression(conseq) if conseq else ExpConst.null()
+
+        elif node.type == "await_expression":
+            # await_expression has NO "argument" field -- the awaited expression
+            # is an unnamed child after the `await` keyword. Using the (missing)
+            # field dropped the inner call entirely, so every `await db.find(...)`
+            # / `await fs.readFile(...)` sink was invisible. Unwrap the real child.
+            inner = node.child_by_field_name("argument")
+            if inner is None:
+                for c in node.children:
+                    if c.type != "await":
+                        inner = c
+                        break
+            return self._translate_expression(inner) if inner is not None else ExpConst.null()
+
+        elif node.type == "new_expression":
+            cons = node.child_by_field_name("constructor")
+            cons_name = self._get_text(cons) if cons else "Object"
+            args = []
+            args_node = node.child_by_field_name("arguments")
+            if args_node:
+                for child in args_node.children:
+                    if child.type not in ("(", ")", ","):
+                        args.append(self._translate_expression(child))
+            # A constructor can itself be a sink (e.g. new Function(userCode) is
+            # code injection). Emit the TaintSink as a side effect so it fires in
+            # any context (var initializer, argument, etc.).
+            spec = self.specs.get(cons_name) or self.specs.get(f"new {cons_name}")
+            if spec and spec.is_taint_sink():
+                kind = _get_sink_kind(spec.is_sink)
+                for arg_idx in spec.sink_args:
+                    if arg_idx < len(args):
+                        self._add_instr(TaintSink(
+                            loc=self._get_location(node), exp=args[arg_idx],
+                            kind=kind, description=spec.description, arg_index=arg_idx))
+            return ExpCall(ExpConst.string(f"new {cons_name}"), args)
+
+        elif node.type in ("as_expression", "satisfies_expression",
+                            "non_null_expression"):
+            # TypeScript type assertions (`x as string`, `x satisfies T`, `x!`)
+            # are transparent to runtime values and taint -- translate the inner
+            # expression and drop the type so `req.query.id as string` stays a
+            # recognized source.
+            inner = node.named_child(0) if node.named_child_count else None
+            return (self._translate_expression(inner) if inner is not None
+                    else ExpConst.null())
+
+        elif node.type in ("jsx_element", "jsx_self_closing_element", "jsx_fragment"):
+            # JSX evaluates to a React element (opaque value for taint), but its
+            # attributes may carry taint sinks (e.g. dangerouslySetInnerHTML).
+            # Walk the whole subtree and emit any TaintSink instructions.
+            self._scan_jsx_for_sinks(node)
+            return ExpConst.null()
+
+        # Default
+        text = self._get_text(node)
+        return ExpVar(PVar(text)) if text else ExpConst.null()
+
+    def _scan_jsx_for_sinks(self, node: TSNode) -> None:
+        """Recursively walk a JSX subtree and emit TaintSink instructions for
+        sink-bearing attributes such as React's ``dangerouslySetInnerHTML``.
+
+        JSX sinks are attributes nested arbitrarily deep in the element tree, so
+        we walk every descendant here rather than relying on the (non-recursing)
+        ``_translate_expression`` dispatch on the JSX root.
+        """
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if cur.type == "jsx_attribute":
+                self._emit_jsx_attribute_sink(cur)
+            for child in cur.children:
+                stack.append(child)
+
+    def _emit_jsx_attribute_sink(self, attr_node: TSNode) -> None:
+        """If a JSX attribute is a known taint sink, emit a TaintSink for the
+        value it injects so the taint engine confirms whether that value is
+        actually attacker-tainted (only then is it reported as a vulnerability).
+        """
+        # Attribute name is the leading property_identifier child.
+        name_node = next(
+            (c for c in attr_node.children if c.type == "property_identifier"),
+            None,
+        )
+        if name_node is None:
+            return
+
+        spec = self.specs.get(self._get_text(name_node))
+        if not spec or not spec.is_taint_sink():
+            return
+
+        # Attribute value lives in a JSX expression container: ={ ... }.
+        # (tree-sitter-javascript names this node "jsx_expression"; some
+        # grammar versions use "jsx_expression_container".)
+        container = next(
+            (c for c in attr_node.children
+             if c.type in ("jsx_expression", "jsx_expression_container")),
+            None,
+        )
+        if container is None:
+            return
+
+        value_node = self._extract_jsx_sink_value(container)
+        if value_node is None:
+            return
+
+        self._add_instr(TaintSink(
+            loc=self._get_location(attr_node),
+            exp=self._translate_expression(value_node),
+            kind=_get_sink_kind(spec.is_sink),
+            description=spec.description,
+            arg_index=0,
+        ))
+
+    def _extract_jsx_sink_value(self, container_node: TSNode) -> Optional[TSNode]:
+        """Extract the taint-relevant value from a JSX expression container.
+
+        For ``dangerouslySetInnerHTML={{ __html: EXPR }}`` returns the ``EXPR``
+        node of the ``__html`` property. Falls back to the container's inner
+        expression when there is no inline ``__html`` object (e.g. ``={x}``).
+        """
+        inner = next(
+            (c for c in container_node.children if c.type not in ("{", "}")),
+            None,
+        )
+        if inner is None:
+            return None
+
+        # Inline object literal: { __html: EXPR }
+        if inner.type == "object":
+            for child in inner.children:
+                if child.type != "pair":
+                    continue
+                key_node = child.child_by_field_name("key")
+                key_text = self._get_text(key_node).strip("\"'") if key_node else ""
+                if key_text == "__html":
+                    return child.child_by_field_name("value")
+            return None
+
+        # Otherwise the inner expression itself is the injected value.
+        return inner
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    def _get_text(self, node: TSNode) -> str:
+        """Get text of a node.
+
+        tree-sitter reports byte offsets into the UTF-8-encoded source, so slice
+        the byte buffer -- slicing the str directly desynchronizes on any
+        multi-byte character (e.g. non-ASCII comments/strings, common in real
+        npm packages) and corrupts every node extracted after it."""
+        if node is None:
+            return ""
+        return self._source_bytes[node.start_byte:node.end_byte].decode(
+            "utf-8", errors="replace")
+
+    def _get_string_content(self, node: TSNode) -> str:
+        """Extract string content (without quotes)"""
+        text = self._get_text(node)
+        if text.startswith('"""') or text.startswith("'''"):
+            return text[3:-3]
+        elif text.startswith('"') or text.startswith("'") or text.startswith('`'):
+            return text[1:-1]
+        return text
+
+    def _get_location(self, node: TSNode) -> Location:
+        """Get source location for a node"""
+        return Location(
+            file=self._filename,
+            line=node.start_point[0] + 1,
+            column=node.start_point[1],
+            end_line=node.end_point[0] + 1,
+            end_column=node.end_point[1]
+        )
+
+    def _get_call_name(self, call_node: TSNode) -> str:
+        """Get full name of function being called"""
+        func = call_node.child_by_field_name("function")
+        if func:
+            return self._get_text(func)
+        return ""
+
+    def _get_member_chain(self, node: TSNode) -> str:
+        """
+        Get the full member access chain as a string.
+        E.g., req.body.name -> "req.body.name"
+        Also handles binary expressions to extract the left-hand taint source.
+        """
+        if node is None:
+            return ""
+        if node.type == "identifier":
+            return self._get_text(node)
+        elif node.type == "member_expression":
+            obj = node.child_by_field_name("object")
+            prop = node.child_by_field_name("property")
+            obj_chain = self._get_member_chain(obj)
+            prop_name = self._get_text(prop) if prop else ""
+            if obj_chain:
+                return f"{obj_chain}.{prop_name}"
+            return prop_name
+        elif node.type == "subscript_expression":
+            obj = node.child_by_field_name("object")
+            return self._get_member_chain(obj)
+        elif node.type == "binary_expression":
+            # For ?? and || operators, check the left side for taint source
+            left = node.child_by_field_name("left")
+            return self._get_member_chain(left)
+        elif node.type == "parenthesized_expression":
+            # Unwrap parentheses
+            for child in node.children:
+                if child.type not in ("(", ")"):
+                    return self._get_member_chain(child)
+            return ""
+        else:
+            return self._get_text(node)
+
+    def _check_property_taint_source(
+        self,
+        node: TSNode,
+        target: str,
+        loc: Location
+    ) -> List[Instr]:
+        """
+        Check if a property access expression is a taint source.
+        Returns TaintSource instructions if the expression matches a known source pattern.
+
+        Examples:
+            req.body -> TaintSource(user)
+            req.query.id -> TaintSource(user)
+            req.params.userId -> TaintSource(user)
+        """
+        instrs = []
+
+        if node is None:
+            return instrs
+
+        # For binary expressions, extract the left-hand side
+        actual_node = node
+        if node.type == "binary_expression":
+            left = node.child_by_field_name("left")
+            if left:
+                actual_node = left
+
+        # Get the full member chain
+        chain = self._get_member_chain(actual_node)
+        if not chain:
+            return instrs
+
+        # Check if the full chain matches a source
+        spec = self.specs.get(chain)
+        if spec and spec.is_taint_source():
+            kind = TaintKind(spec.is_source) if spec.is_source in [t.value for t in TaintKind] else TaintKind.USER_INPUT
+            instrs.append(TaintSource(
+                loc=loc,
+                var=PVar(target),
+                kind=kind,
+                description=spec.description or f"Taint from {chain}"
+            ))
+            return instrs
+
+        # Check prefixes - e.g., req.body.name should match req.body
+        parts = chain.split(".")
+        for i in range(len(parts), 0, -1):
+            prefix = ".".join(parts[:i])
+            spec = self.specs.get(prefix)
+            if spec and spec.is_taint_source():
+                kind = TaintKind(spec.is_source) if spec.is_source in [t.value for t in TaintKind] else TaintKind.USER_INPUT
+                instrs.append(TaintSource(
+                    loc=loc,
+                    var=PVar(target),
+                    kind=kind,
+                    description=spec.description or f"Taint from {prefix}"
+                ))
+                return instrs
+
+        return instrs
+
+    def _check_expression_for_taint_source(
+        self,
+        node: TSNode,
+        target: str,
+        loc: Location
+    ) -> List[Instr]:
+        """
+        Recursively check any expression for taint sources.
+        Handles member_expression, binary_expression, ternary_expression, etc.
+
+        This is more comprehensive than _check_property_taint_source as it
+        handles complex expressions like:
+            - req.query.q ?? ""
+            - condition ? req.body.x : default
+            - (req.params.id)
+        """
+        if node is None:
+            return []
+
+        node_type = node.type
+
+        # Direct member expression - delegate to existing method
+        if node_type == "member_expression":
+            return self._check_property_taint_source(node, target, loc)
+
+        # Binary expressions (??. ||, etc.) - check left side
+        elif node_type == "binary_expression":
+            left = node.child_by_field_name("left")
+            if left:
+                return self._check_expression_for_taint_source(left, target, loc)
+
+        # Ternary expression - check both branches
+        elif node_type == "ternary_expression":
+            consequence = node.child_by_field_name("consequence")
+            alternative = node.child_by_field_name("alternative")
+
+            # Check consequence first
+            if consequence:
+                instrs = self._check_expression_for_taint_source(consequence, target, loc)
+                if instrs:
+                    return instrs
+
+            # Check alternative
+            if alternative:
+                instrs = self._check_expression_for_taint_source(alternative, target, loc)
+                if instrs:
+                    return instrs
+
+        # Parenthesized expression - unwrap
+        elif node_type == "parenthesized_expression":
+            for child in node.children:
+                if child.type not in ("(", ")"):
+                    return self._check_expression_for_taint_source(child, target, loc)
+
+        # TypeScript type assertions are transparent - unwrap the value
+        elif node_type in ("as_expression", "satisfies_expression",
+                           "non_null_expression"):
+            inner = node.named_child(0) if node.named_child_count else None
+            if inner is not None:
+                return self._check_expression_for_taint_source(inner, target, loc)
+
+        # Subscript expression - check the object being accessed
+        elif node_type == "subscript_expression":
+            obj = node.child_by_field_name("object")
+            if obj:
+                return self._check_expression_for_taint_source(obj, target, loc)
+
+        return []
+
+    def _get_call_args(self, call_node: TSNode) -> List[TSNode]:
+        """Get argument nodes from call"""
+        args = []
+        args_node = call_node.child_by_field_name("arguments")
+        if args_node:
+            for child in args_node.children:
+                if child.type not in ("(", ")", ",", "comment"):
+                    args.append(child)
+        return args
+
+    def _new_ident(self, prefix: str = "tmp") -> Ident:
+        """Create a new unique identifier"""
+        ident = Ident(prefix, self._ident_counter)
+        self._ident_counter += 1
+        return ident
+
+    def _add_instr(self, instr: Instr) -> None:
+        """Add instruction to current node"""
+        if self._current_node:
+            self._current_node.add_instr(instr)
+
+    def _add_instrs(self, instrs: List[Instr]) -> None:
+        """Add multiple instructions to current node"""
+        for instr in instrs:
+            self._add_instr(instr)
+
+
+class TypeScriptFrontend(JavaScriptFrontend):
+    """TypeScript frontend - extends JavaScript with type annotations."""
+
+    def __init__(self, specs: Dict[str, ProcSpec] = None):
+        super().__init__(specs=specs, language="typescript")

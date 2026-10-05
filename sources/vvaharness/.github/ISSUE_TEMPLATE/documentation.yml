@@ -1,0 +1,58 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: "📚 Documentation issue"
+description: "Report unclear, missing, or incorrect documentation"
+title: "[Docs]: "
+labels: ["type:docs", "status:needs-triage"]
+body:
+  - type: dropdown
+    id: doc-set
+    attributes:
+      label: Documentation area
+      options: ["README.md", "docs/SETUP_GUIDE.md", "docs/USER_GUIDE.md", "docs/configuration.md", "docs/models.md", "docs/remediation.md", "docs/validation.md", "docs/architecture.md", "docs/SKILLS.md", "docs/exploit-verification.md", "docs/security.md", "docs/features.md", "docs/outputs.md", "docs/errors.md", "docs/deepagents.md", "docs/repos-csv.md", "docs/contributor-issue-guide.md", "Other"]
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where?
+      placeholder: "e.g. docs/USER_GUIDE.md Run section"
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is unclear, missing, or wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement (optional)
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Quick checks
+      options:
+        - label: "I checked whether this behavior is already documented in README.md or docs/USER_GUIDE.md."
+          required: false
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: "I understand that any Contribution I submit is subject to the **Contribution Submission Terms and Agreement** within [**CONTRIBUTING.md**](https://github.com/visa/visa-vulnerability-agentic-harness/blob/main/CONTRIBUTING.md), including the provisions on Ownership and Sufficient Rights, Legal Authority to Bind, No Conflicting Obligations, No Restricted Data, and Applicable License Terms and further that a record of my agreement to these terms, including my username and submission metadata, will be maintained indefinitely as part of the project's public record, and that the rights I have granted under the applicable license are irrevocable."
+          required: true
+                  

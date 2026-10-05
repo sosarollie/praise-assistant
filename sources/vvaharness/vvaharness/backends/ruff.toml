@@ -1,0 +1,33 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# `extend`, not a copy: ruff uses the NEAREST config for a file and never merges with an outer one.
+extend = "../validation/ruff.toml"
+
+# The repo root, so isort agrees on first-party under both discovery and `--config`.
+src = ["../.."]
+
+# Run as `ruff check vvaharness/backends/`; `--config <path>` re-anchors the globs below to the cwd.
+
+[lint]
+# PLC0415 (imports at top) is the only rule ruff has for these conventions; the rest is review.
+extend-select = ["PLC0415", "ERA001"]
+
+[lint.per-file-ignores]
+# `**/`-prefixed so the ignores survive both invocation modes.
+"**/__init__.py" = ["D104", "F401"]  # re-export facades
+# The legacy-shaped wrappers mirror the registry backends' signatures verbatim:
+# the arg count IS the legacy contract (PLR0913), and permission_mode/max_tokens
+# are accepted-and-ignored on this route by design (ARG001).
+"**/llm/deepagents.py" = ["PLR0913", "ARG001"]

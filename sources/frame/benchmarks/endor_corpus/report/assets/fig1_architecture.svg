@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 620" font-family="DejaVu Sans, Segoe UI, sans-serif" font-size="13">
+  <defs>
+    <marker id="arw" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7.5,3 L0,6 Z" fill="#555"/>
+    </marker>
+    <style>
+      .t{text-anchor:middle;fill:#1a1a1a;}
+      .sub{text-anchor:middle;fill:#33475b;font-size:10.5px;}
+      .grey{fill:#eef0f2;stroke:#c2c8ce;stroke-width:1.2;}
+      .blue{fill:#dbe7f4;stroke:#2f6db3;stroke-width:1.3;}
+      .bluef{fill:#c7dbf0;stroke:#2f6db3;stroke-width:1.3;}
+      .green{fill:#dcece0;stroke:#5aa469;stroke-width:1.3;}
+      .greenf{fill:#cbe3d2;stroke:#5aa469;stroke-width:1.3;}
+      .amber{fill:#f6e6d2;stroke:#d98c3f;stroke-width:1.3;}
+      .dark{fill:#2f3a45;stroke:#2f3a45;}
+      .edge{stroke:#555;stroke-width:1.5;fill:none;}
+      .lbl{fill:#666;font-size:10.5px;font-style:italic;text-anchor:middle;}
+    </style>
+  </defs>
+
+  <!-- top pipeline (centered) -->
+  <rect class="grey" rx="7" x="390" y="20" width="180" height="36"/>
+  <text class="t" x="480" y="43">Source code</text>
+  <rect class="grey" rx="7" x="390" y="72" width="180" height="36"/>
+  <text class="t" x="480" y="95">Language frontend</text>
+  <rect class="grey" rx="7" x="390" y="124" width="180" height="36"/>
+  <text class="t" x="480" y="147">SIL</text>
+  <path class="edge" d="M480,56 L480,72" marker-end="url(#arw)"/>
+  <path class="edge" d="M480,108 L480,124" marker-end="url(#arw)"/>
+
+  <!-- clean orthogonal branch from SIL to the two columns -->
+  <path class="edge" d="M480,160 L480,190"/>
+  <path class="edge" d="M480,190 L200,190 L200,216" marker-end="url(#arw)"/>
+  <path class="edge" d="M480,190 L780,190 L780,216" marker-end="url(#arw)"/>
+
+  <!-- LEFT: symbolic layer -->
+  <text x="60" y="207" fill="#2f6db3" font-size="11px" font-weight="bold">SOUND SYMBOLIC LAYER (default)</text>
+  <rect class="blue" rx="8" x="60" y="216" width="280" height="60"/>
+  <text class="t" x="200" y="241">Symbolic core (sound)</text>
+  <text class="sub" x="200" y="261">taint · separation logic · Z3</text>
+  <path class="edge" d="M200,276 L200,322" marker-end="url(#arw)"/>
+  <rect class="bluef" rx="8" x="110" y="322" width="180" height="40"/>
+  <text class="t" x="200" y="347">Proven findings</text>
+
+  <!-- RIGHT: LLM layer -->
+  <text x="630" y="207" fill="#5aa469" font-size="11px" font-weight="bold">OPTIONAL LLM LAYER (any OpenAI endpoint)</text>
+  <rect class="green" rx="8" x="630" y="216" width="300" height="60"/>
+  <text class="t" x="780" y="241">LLM detection</text>
+  <text class="sub" x="780" y="261">long-context + agentic (read_file / grep)</text>
+  <path class="edge" d="M780,276 L780,320" marker-end="url(#arw)"/>
+  <rect class="greenf" rx="8" x="650" y="320" width="260" height="54"/>
+  <text class="t" x="780" y="343">Symbolic verification</text>
+  <text class="sub" x="780" y="362">sink-grounding, cross-file</text>
+  <path class="edge" d="M780,374 L780,418" marker-end="url(#arw)"/>
+  <rect class="green" rx="8" x="650" y="418" width="260" height="40"/>
+  <text class="t" x="780" y="443">Tiered: llm_verified / llm_detect</text>
+
+  <!-- caption in the gap between columns -->
+  <text class="lbl" x="475" y="300">the LLM proposes,</text>
+  <text class="lbl" x="475" y="315">the symbolic engine verifies</text>
+
+  <!-- merge into triage (orthogonal, routed below the columns) -->
+  <rect class="amber" rx="8" x="350" y="500" width="260" height="44"/>
+  <text class="t" x="480" y="527">LLM triage: drop confident FPs</text>
+  <path class="edge" d="M200,362 L200,522 L350,522" marker-end="url(#arw)"/>
+  <path class="edge" d="M780,458 L780,522 L610,522" marker-end="url(#arw)"/>
+
+  <!-- final report -->
+  <path class="edge" d="M480,544 L480,568" marker-end="url(#arw)"/>
+  <rect class="dark" rx="7" x="378" y="568" width="204" height="32"/>
+  <text class="t" x="480" y="589" fill="#fff">Final report (proven + tiered)</text>
+</svg>

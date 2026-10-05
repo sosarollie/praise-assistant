@@ -1,0 +1,38 @@
+# Credentials and operational state never belong in this backup.
+.env
+.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.ovpn
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+auth.json
+oauth_creds.json
+hosts.yml
+.git-credentials
+.netrc
+secrets.txt
+api_keys.txt
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+sessions/
+terminal-sessions/
+*.log
+*.pcap
+*.pcapng
+# Engagement evidence and the explicitly excluded standalone products.
+/evidence/
+/engagements/
+**/agentschat.md
+**/Agentic-Bug-Hunter/
+**/cyberstrike/
+**/CyberStrikeAI/
+# Restore/download scratch state is kept outside the repository.
+.restore-state/

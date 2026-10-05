@@ -1,0 +1,6 @@
+#!/bin/sh
+# A script with no extension at all. An empty suffix is not a known language
+# extension, the basename "deploy" is not a recognised security-config name,
+# and it is not infrastructure-as-code, so it gets the same zero-reviewer
+# treatment as Makefile and config/service.conf.
+echo "deploying fixture"

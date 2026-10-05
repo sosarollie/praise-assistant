@@ -1,0 +1,64 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Strict lint/format standard for the validation package.
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "B", "SIM", "RET", "TRY", "C90", "PLR",
+  "ANN", "D", "PTH", "RUF", "ARG", "C4", "PERF", "PIE", "DTZ", "ISC", "A", "S",
+]
+ignore = [
+  "TRY003",
+  "D203",   # one-blank-line-before-class (conflicts with D211)
+  "D213",   # multi-line-summary-second-line (conflicts with D212)
+  "ANN401", # Dynamically typed expressions (Any) — needed in harness shim layer
+]
+
+# One try block per function; clean raise patterns; simplify dict.get(k, None) → .get(k).
+extend-select = ["TRY201", "TRY300", "TRY301", "TRY400", "SIM910"]
+
+[lint.per-file-ignores]
+"scoring/*" = ["S", "S603", "S607"]    # scoring spawns subprocesses legitimately
+"__init__.py" = ["D104", "F401"]       # re-export modules
+# The @tool function names ARE the LLM-facing tool contract: `_fact_tools` matches them
+# against the `allowed` name set and the agent calls them by that exact name. PascalCase
+# is required, so N802 (lowercase function name) cannot apply here.
+"**/tools/deep_tools.py" = ["N802"]
+# A005 fires only when ruff runs from inside this package, where it infers the module as
+# top-level `io`. It is always imported as `vvaharness.validation.io`, so nothing shadows
+# stdlib `io`; the package itself never imports stdlib `io` either.
+"io/__init__.py" = ["A005", "D104", "F401"]
+"**/test_*.py" = ["S101", "ANN", "D", "PLR2004"]
+"tests/*.py" = ["S101", "ANN", "D", "PLR2004"]
+
+[lint.mccabe]
+max-complexity = 6
+
+[lint.pylint]
+max-args = 5
+max-branches = 4
+max-returns = 3
+max-statements = 30
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.isort]
+known-first-party = ["vvaharness"]
+
+[format]
+quote-style = "double"

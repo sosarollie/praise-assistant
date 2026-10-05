@@ -1,0 +1,612 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ── taint-first profile ──────────────────────────────────────────────────────
+# Source→sink scanning with the callgraph engine. Its taint-oriented behavior:
+#   ① step0       — tree-sitter AST seed (also enabled by default.yaml and
+#                   full.yaml, both in llm mode rather than this one's). In
+#                   rules mode, configured source/sink YAML is the rule source;
+#                   the shipped blank paths produce no rule-based seeds.
+#   ② step1.mode  — with a non-empty S0 seed, gap_fill skips the agentic
+#                   explorer except for the narrow large-service escalation
+#                   predicate below; an empty seed uses agentic S1
+#   ③ step3       — catch-all runs LAST (catchall_deduct_lens_coverage: true)
+#                   so every source file is reviewed by risk/taint/specialist
+#                   lenses first and catch-all sweeps only the non-source
+#                   residue; taint chunks are function-sliced
+#   ④ step4       — confirm/refute prompt on taint chunks, single-run, Opus tier
+#   ⑤ report      — after S8 the Markdown appendix lists files excluded from
+#                   catch-all review. Under catchall_mode: all + deduct=true
+#                   the appendix is expected to be empty (nothing dropped);
+#                   flip catchall_deduct_lens_coverage back to false and
+#                   catchall_mode back to reachable_only to restore the legacy
+#                   audit story. S9 emits SARIF.
+#
+# A/B against default.yaml on the same repo:
+#   vvaharness scan --repo <r> --config vvaharness/config/profiles/default.yaml
+#   vvaharness scan --repo <r> --config vvaharness/config/profiles/taint.yaml
+#
+# S1–S9 backend notes mirror default.yaml (including the `via:` legend and its
+# dual-meaning deepagents entry: zero-tool single-shot run on the single-prompt
+# detection roles, agent graph on preprocess/verify/remediate/validate);
+# S10/S11 are disabled below.
+# Like default.yaml, every DETECTION role here is via:deepagents (provider
+# anthropic) — no via:cli or via:sdk detection role remains — so one Anthropic
+# credential covers a detection-only run and no external `claude` binary is
+# needed for it.
+
+models:
+  # --auto-step1: repo survey is pre-packed in Python → single SDK prompt
+  # autoexclude: {id: claude-opus-4-7,       via: sdk}
+  autoexclude: {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # Primary role for step0 callgraph annotator mode.
+
+  # Used when step0.callgraph_detection='llm'.
+  # graph_annotate: {id: claude-opus-4-7, via: sdk}
+  graph_annotate: {id: claude-opus-4-7, via: deepagents, provider: anthropic}
+
+  # Step 1: agentic repo exploration — needs filesystem tools.
+  # via:openai uses sandboxed Read/Glob/Grep (no Bash — keep it out of
+  # step1.allowed_tools below). via:cli also works but requires claude auth.
+  # Options:
+  #   {id: claude-opus-4-7, via: cli}      ← CLI subprocess (needs auth)
+  #   {id: gpt-5.5, via: openai}                  ← OpenAI/gateway (sandboxed tools)
+  # preprocess:  {id: claude-sonnet-4-6, via: sdk}
+  preprocess:  {id: claude-sonnet-4-6, via: deepagents, provider: anthropic}  # read-only harness tool loop
+  # Step 2: threat model — single-shot SDK reasoning over packed evidence
+  # threatmodel: {id: claude-opus-4-7,       via: sdk}
+  threatmodel: {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # threatmodel: {id: glm-5.2,             via: deepagents, provider: openai}   # + OPENAI_BASE_URL
+  # Step 3: strategic decomposition — pure reasoning over the ContextPackage,
+  # no tools needed → SDK for direct max_tokens / connection pooling.
+  # decompose:   {id: claude-opus-4-7,       via: sdk}
+  decompose:   {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # decompose:   {id: glm-5.2,             via: deepagents, provider: openai}   # + OPENAI_BASE_URL
+  # Step 4: deep-dive (deterministic single-pass; raise runs+temperature for vote mode)
+  # Swap the line below to switch backend — all four are interchangeable here:
+  #   {id: claude-opus-4-7,       via: sdk}     ← Anthropic SDK
+  # deepdive:    {id: claude-opus-4-7,       via: sdk}
+  deepdive:    {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # Step 6: adversarial verification — needs Read/Glob/Grep.
+  # cli and openai both provide them; swap freely:
+  #   {id: claude-opus-4-7, via: cli}
+  #   {id: gpt-5.5, via: openai}
+  # verify:      {id: claude-opus-4-7, via: sdk}
+  verify:      {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # Step 7: semantic deduplication
+  # dedup:       {id: claude-opus-4-7,       via: sdk}
+  dedup:       {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+  # Step 8: chain analysis
+  # chain:       {id: claude-opus-4-7,       via: sdk}
+  chain:       {id: claude-opus-4-7,     via: deepagents, provider: anthropic}
+
+  # Step 10: enabled both in `scan` and through the standalone `remediate`
+  # command. It selects up to step_remediate.top_n_findings, can edit target
+  # source in fix mode, and writes artefacts under <repo>/security-remediation/.
+  remediate:   {id: claude-opus-4-8, via: deepagents, provider: anthropic}
+
+  # models.validate: used by enabled in-scan S11 and standalone `validate`.
+  # orchestrator is the main model; persona overrides inherit it when unset.
+  # provider selects the deepagents endpoint: openai (Chat Completions) | anthropic (Messages).
+  #
+  # ONE VENDOR PER PANEL. `via` and `provider` are read from `orchestrator` ONLY and
+  # apply to the orchestrator and all three personas; on a persona key they are
+  # ignored (only `id` is honoured). Personas may use a different model id from the
+  # SAME vendor, but a mixed-vendor panel is refused when validate starts
+  # (exit 2) — e.g. a `gpt-*` persona under an anthropic orchestrator.
+  # See docs/models.md for persona model selection guidance.
+  validate:
+    orchestrator:       {id: claude-opus-5, via: deepagents, provider: anthropic}
+    security_architect: {id: claude-opus-4-8}
+    penetration_tester: {id: claude-opus-4-8}
+    cross_repo_analyzer: {id: claude-opus-4-8}
+
+  # S6 exploit verification — only runs when EV_API_COLLECTION is set. Four jobs, four
+  # roles: batch triage, code reading, payload crafting, adjudication. Give `judge` a
+  # DIFFERENT and ideally stronger model than `attacker`: it is the confirmation authority,
+  # so its independence should hold at the model level and not merely structurally.
+  #
+  # `attacker` (the adaptive loop) is optional and the only role restricted by backend: it
+  # supplies its own `http_request` tool, so it needs `via: sdk`, `openai` or `deepagents`
+  # — `via: cli` cannot carry a caller's tool (its subprocess exposes built-ins only). Its
+  # credential is therefore wanted only on a run that enables EV. Omit the line to run EV
+  # without the adaptive loop; the deterministic payload set and the judge still run.
+  # **Beta — API only.** Exploit verification needs a Postman/OpenAPI/Swagger collection and
+  # can only verify findings that map to an HTTP endpoint; everything else stays SAST-only.
+  exploit_verification:
+    attacker: {id: claude-opus-4-7,   via: deepagents, provider: anthropic}
+    judge:    {id: claude-opus-4-8,   via: deepagents, provider: anthropic}
+    classify: {id: claude-sonnet-4-6, via: deepagents, provider: anthropic}
+    mapper:   {id: claude-sonnet-4-6, via: deepagents, provider: anthropic}
+
+sdk:
+  api_key: ${ANTHROPIC_SDK_API_KEY}
+  base_url:   ${ANTHROPIC_SDK_BASE_URL}
+  verify_ssl: true
+  ca_cert:     ${ANTHROPIC_SDK_CA_CERT}     # absolute CA path; via:sdk + deepagents (anthropic)
+  client_cert: ${ANTHROPIC_SDK_CLIENT_CERT} # absolute mTLS cert path; via:sdk + deepagents (anthropic)
+
+openai:
+  api_key:    ${OPENAI_API_KEY}
+  base_url:   ${OPENAI_BASE_URL}
+  verify_ssl: true
+  ca_cert:    ${OPENAI_CA_CERT}             # absolute CA path; via:openai + deepagents (openai)
+
+cli:
+  verify_ssl: true
+  ca_cert:    ${CLAUDE_CLI_CA_CERT}         # absolute CA path -> NODE_EXTRA_CA_CERTS
+  effort: high
+
+# Prompt-cache controls for all SDK/OpenAI model calls. Both values below are
+# the built-in defaults, restated here so the knobs are discoverable.
+cache_markers: "on"
+cache_min_block_tokens: null
+# `cache_route` IS pre-declared here — one of the two shipped profiles that do
+# (`sdk.yaml` is the other). Only the `via: sdk` transport reads this key: the
+# `via: deepagents` roles that make up most of this profile never consult it, and
+# `via: cli` places no markers this tool controls.
+#
+# What declaring it actually changes, which is narrower than it looks: `auto`
+# classifies the endpoint by hostname and withholds markers when it cannot
+# recognise one, and with `sdk.base_url` unset it already resolves to the
+# Anthropic regime. So this line only alters behaviour when
+# `ANTHROPIC_SDK_BASE_URL` points at a gateway `auto` does not recognise — there
+# it forces the Anthropic regime instead of forfeiting caching. That is a
+# cost-over-fail-closed choice, and the right one for a gateway that genuinely is
+# Anthropic-Messages-compatible. `full.yaml` and `taint.yaml` make the opposite
+# choice on the same information, which is why this is a per-profile decision
+# rather than something derivable from the roles.
+#
+# Consequence to understand before repointing this profile: `anthropic`
+# short-circuits host detection, so Anthropic-shaped cache markers are sent
+# regardless of the endpoint. Against a non-Anthropic gateway a strict one may
+# reject the request outright and a lenient one will simply bill uncached. If you
+# repoint `sdk.base_url` at such a gateway, set this back to `auto` (or comment the
+# line out — `auto` is the built-in default).
+cache_route: anthropic
+
+# ① ── Step 0 — Static seed (callgraph, offline, no external binary) ─────────
+# The callgraph engine reads external YAML artifacts when configured. In rules
+# mode, absent artifacts yield empty source/sink rule sets; there is no implicit
+# heuristic source/sink baseline.
+# No model, registry fetch, semgrep binary, SARIF, or proxy/CA setup is required.
+step0:
+  enabled: true
+  # Source/sink selection mode:
+  # - rules: load YAML sources/sinks below (deterministic + stable)
+  # - llm: two-pass annotator flow. First pass scans AST calls, second pass
+  #        classifies call fingerprints into source/sink specs.
+  #        If llm returns no usable specs or fails, runtime falls back to rules.
+  callgraph_detection: rules      # rules | llm
+  # LLM-specific knobs for annotator mode.
+  callgraph:
+    llm:
+      max_tokens: 16000
+      max_candidates: 400
+      max_batch_candidates: 150
+      min_source_confidence: 0.75
+      min_sink_confidence: 0.75
+      failure_mode: empty        # empty | fail
+      heuristic_supplement: true
+      min_sources: 1
+      min_sinks: 1
+      max_heuristic_specs: 10
+  # Optional generated corpora remain external so their source provenance and
+  # licenses stay explicit. Leave these unset for no external rules. To use your
+  # own artifacts, set ABSOLUTE paths (relative paths resolve against the
+  # caller's CWD, not the target repo).
+  sources_yaml: ${VVA_STEP0_SOURCES_YAML:-}
+  sinks_yaml:   ${VVA_STEP0_SINKS_YAML:-}
+  call_graph_max_targets: 3  # max call-graph fanout targets per call site (step1 fallback if absent)
+
+step1:
+  
+  # ── AI auto-exclude (per-target Step-1 overlay) ──
+  # When true, after each clone the harness AI-surveys the target and derives a
+  # per-target exclude overlay (dirs/exts/globs) BEFORE s1 — same behaviour as
+  # the --auto-step1 CLI flag. Flag and config OR together; --no-auto-step1
+  # hard-disables for a run; --step1-config still wins over both.
+  auto_exclude: true
+  auto_exclude_max_tokens: 8000     # output cap for the auto-exclude survey call (models.autoexclude)
+
+  # ② gap_fill: with a non-empty S0 seed, use that seed + deterministic file
+  #    walk + tree-sitter graph without an S1 model call unless ALL escalation
+  #    conditions hold: more than 500 source files, web-api/web-app/service
+  #    classification, zero sinks OR (≥10 entry points and <5 sinks). An
+  #    empty seed is falsey and takes the agentic S1 path. If no entry points or
+  #    sinks remain after S1, s3 reverts catchall_mode to `all`.
+  mode: gap_fill                    # full | gap_fill
+  call_graph: tree_sitter           # regex | tree_sitter — AST-exact def spans + caller resolution.
+                                    # Uses base install dependencies; auto-falls-back to regex if parsers are unavailable.
+  max_budget_usd: 25.0               # when S1 runs, forwarded only if the installed CLI supports --max-budget-usd
+  max_turns: 10
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+  exclude_dirs:
+    - .vs
+    - .settings
+    - .vscode
+    - .idea
+    - node_modules
+  exclude_exts:
+    # compiled / packaged binaries (complements built-in .exe/.dll/.so/.jar/.class/.o/.a/.obj)
+    - .msi
+    - .nupkg
+    - .pdb
+    - .lib
+    - .aar
+    - .ser
+    - .pbix
+    # binary keystores / certs (.pem stays in scope — text, may hold secrets)
+    - .p12
+    - .pfx
+    - .jks
+    - .der
+    - .cer
+    # office binaries
+    - .doc
+    - .docx
+    - .xls
+    - .xlsx
+    - .xlsm
+    - .bmp
+    # opaque data stores
+    - .sqlite
+    - .db
+  exclude_globs:
+    - "**/._*"                            # macOS resource forks
+  max_file_kb: 1024                       # skip files larger than this (catches data dumps; lets normal CSV/JSON through)
+  call_graph_validate: true
+  call_graph_supplement: true
+  call_graph_rounds: 4
+  call_graph_max_targets: 3
+  config_dedup:
+    enabled: true
+    min_cluster_size: 5
+    keep_per_top_dir: true
+    promote_on_secret_hit: true
+    promote_on_insecure_value: true
+
+step2:
+  enabled: true
+  max_tokens: 64000
+  max_threats: 50
+  baseline: auto
+  max_doc_chars: 32000
+  max_manifest_chars: 4000
+  max_modules: 100
+  max_entry_points: 400
+  max_config_reps: 80
+  # The first max_config_rep_bodies reps are packed as redacted contents capped
+  # at max_config_rep_chars each; the remaining reps are listed by path only.
+  max_config_rep_chars: 2000
+  max_config_rep_bodies: 12
+  # agentic: false                  # opt-in per run: S2 swaps its single prompt for a
+  #                                 # read-only Read/Glob/Grep tool-loop; max_turns (12)
+  #                                 # is the only real bound (max_budget_usd is a no-op
+  #                                 # on sdk/openai).
+  max_api_artefacts: 100
+  # AST call-graph frontier caps for the threat-model evidence view.
+  # Visible in the `[s2] frontier` log line as `N/total edges`.
+  max_graph_files: 250              # max files in the s2 AST evidence view
+  max_graph_sinks: 100               # max sinks forwarded to the s2 prompt
+  max_graph_edges: 100              # max call-graph edges forwarded to the s2 prompt
+
+step3:
+  max_tokens: 64000
+  timeout: 3600
+  taint_chunks: true
+  taint_max_hops: 10                # deeper walks buy speculative paths, not real ones
+  taint_max_chunks: 120             # raised — taint chunks are now the primary vehicle. Matches
+                                    # default.yaml; the registered default stays 60, which sdk.yaml,
+                                    # full.yaml and any key-omitting profile still run.
+  # MUST stay > 0. Taint chunks never pass through _pack(), so this is the ONLY
+  # bound on their width — neither pack_by nor max_files_per_chunk applies to a
+  # taint-NN chunk. With 0 (uncapped), _pick_hop_files returns every candidate
+  # and a 10-hop path through a monolith can pull hundreds of files into one
+  # unshardable prompt. Matters more here than in default.yaml: this profile
+  # emits 2x the taint chunks.
+  taint_files_per_hop: 6
+  # tokens, not loc: function slicing makes actual prompt size unpredictable
+  # (un-graphed files fall back to WHOLE), so bound it on real bytes.
+  pack_by: tokens                   # loc | tokens
+  chunk_token_budget: 180000        # model context window available to one s4 prompt
+  chunk_overhead_tokens: 90000      # 64k step4.max_tokens + ~12k neighbor ctx (25x50) + ~8k SYSTEM/lens + margin
+                                    # → code cap = (180000-90000)*4 = 360000 chars (~90k tok)
+  risk_chunk_loc: 10000             # splitter is INERT under pack_by: tokens, but the threat-fallback
+                                    # pass trims by LOC against this regardless of pack_by (0 = off)
+  # ③ catch-all runs LAST — after specialists and threat-fallback — via
+  #    catchall_deduct_lens_coverage. Its "covered" set includes risk/taint/
+  #    threat-fallback claims only — a specialist's claim on a file does NOT
+  #    suppress catch-all's generic review of that same file (a specialist
+  #    lens is scoped guidance, not a generic pass). Set false to restore the
+  #    legacy order: catch-all runs before specialists exist.
+  catchall_enabled: true
+  catchall_deduct_lens_coverage: true
+  catchall_mode: all          # all | reachable_only — `all` sweeps every
+                                    # eligible file no risk/taint/threat-fallback
+                                    # chunk claimed. Set reachable_only to bound
+                                    # the sweep to files reachable from an entry
+                                    # point/sink; non-source files are force-kept
+                                    # regardless (see catchall_reachable_min_ratio).
+  # Fail open when reachable-only pruning is suspiciously sparse. Unsupported
+  # language files are intentionally treated as reachable, so this guard is
+  # for unexpectedly incomplete supported-language/cross-file graph coverage.
+  # Kept here so switching catchall_mode back to reachable_only is one edit.
+  catchall_reachable_min_ratio: 0.5   # revert to `all` if <50% of eligible files are reachable
+  catchall_reachable_min_files: 0     # 0 = disabled (ratio guard is primary)
+  catchall_chunk_loc: 4000          # INERT under pack_by: tokens
+  # Under pack_by: tokens the *_chunk_loc caps go silent and one char cap applies
+  # to every packed kind — so these file-count caps are what preserves per-kind
+  # width. _pack() honours max_files in BOTH modes.
+  catchall_max_files: 40
+  max_files_per_chunk: 40
+  # ③ function slicing: ship only the functions on the BFS path (+ neighbor
+  #    ctx) rather than whole files, to cut deep-dive tokens. Requires
+  #    call-graph def-spans. NOTE: this mode is resolved before the chunk-size
+  #    check in s4, so it applies to EVERY chunk kind (risk, catch-all,
+  #    specialist) — not only taint chunks.
+  #    Coverage is NOT truncated. A chunk file the call graph resolved no span
+  #    for, or whose resolved functions exceed `step4.frontier_max_funcs_per_file`
+  #    (24), is shipped WHOLE (see _load_graph_slice / _load_taint_slice in
+  #    s4_deepdive.py; each logs "shipped N un-graphed/clipped file(s) whole").
+  #    `file` mode is therefore a token/latency choice, not a coverage fix.
+  taint_chunk_slice: function       # file | function
+  specialists:
+    - crypto
+    - logic-bug
+    - access-control
+    - batch-etl
+    - iac
+    - deserialization               # gated off when no deserializer call site is present
+    - csrf                          # state-changing endpoints missing CSRF token/SameSite — gated on web-framework surface
+    - sensitive-data                # error message leakage, PII in logs/responses, plaintext storage — gated on entry_points
+    - hardcoded-creds               # literal secrets in source/config — gated on credential pattern scan
+    - log-injection                 # attacker-controlled data in log calls; missing security event logging — gated on entry_points
+    - injection                     # SQLi/NoSQLi/cmd/LDAP/XPath/XXE/SSRF/path-traversal/XSS-server-emit/SSTI/open-redirect/CRLF/ReDoS — gated on presence of any injection-family sink
+  specialist_chunk_loc: 10000       # INERT under pack_by: tokens
+  threat_surface_fallbacks: true    # add deterministic threat-tagged fallback chunks when threats remain uncovered
+  threat_fallback_max_files: 20     # per-threat file cap for fallback chunk candidate selection
+  max_threat_fallback_chunks: 50    # ceiling on fallback chunks; matches max_prompt_threats so every
+                                    # threat reaching s3 can still get one. Lower it to bound s4 spend,
+                                    # at the cost of leaving some threats without a dedicated chunk.
+  # AST prompt frontier caps (max_prompt_*) are deliberately NOT set in this
+  # profile: it inherits the registered _STEP_DEFAULTS — files 180, entry
+  # points 60, sinks 80, modules 24, call edges 80, notes chars 2500 — NOT
+  # default.yaml's 200/200/200 raise. The inherited caps do trim on modest
+  # repos; watch the `[s3] ast frontier` log line and set the keys here when
+  # it trims. Full rationale (campaign anecdote) and the profile >
+  # _STEP_DEFAULTS > getattr resolution order live at the _STEP_DEFAULTS
+  # step3 comment in vvaharness/config/__init__.py — the canonical copy.
+
+step4:
+  parallel: 5
+  timeout: 1800
+  # ④ taint chunks: 1 run, confirm/refute the seeded (CWE, source, sink).
+  #    runs: 1 is a deliberate single-pass choice, not a backend limitation:
+  #    every role here is via: deepagents. Every currently shipped profile
+  #    ships runs: 1 / vote_threshold: 1 (voting off); raise both here for
+  #    majority voting.
+  runs: 1
+  taint_runs: 1
+  taint_prompt_mode: confirm_refute # discover | confirm_refute
+  vote_threshold: 1
+  specialist_runs: 1
+  line_bucket: 5
+  # 50 — matches every other shipped profile (the registered default for a
+  # key-omitting profile is 10). Taint chunks run confirm_refute against a
+  # seeded (CWE, source, sink), so a handful of findings per chunk is the
+  # expected yield; this cap mainly bounds the catch-all/specialist chunks
+  # this profile also emits. The `[s4] <chunk>: capping N → 50` stderr line
+  # and the s4_findings_truncated counter in Pipeline Diagnostics show when
+  # it binds.
+  max_findings_per_run: 50
+  max_tokens: 64000
+  neighbor_context_lines: 25
+  neighbor_context_max: 50
+  # Per-file function cap for taint_chunk_slice: function. A file with MORE
+  # resolved functions than this is shipped WHOLE (not truncated), so raising it
+  # trims prompts and lowering it inflates them. Built-in default is 24.
+  frontier_max_funcs_per_file: 24
+
+step5_prefilter:
+  min_pre_confidence: 0.5
+  require_evidence: true
+
+  # ── Pre-verify semantic dedup (S5-b) ──
+  # Fires a single LLM dedup call BEFORE S6, collapsing cross-chunk duplicates
+  # so the verifier never pays per-finding cost on the same root cause twice.
+  line_tolerance: 5                  # trivial-dup line distance for S5 deterministic dedup (pre-verify);
+                                    # EQUAL to step7_dedup.line_tolerance (5) in this profile. Two
+                                    # findings within 5 lines pre-verify are the same raw output.
+  pre_verify_semantic: true         # false → skip the pre-S6 LLM dedup pass entirely
+  pre_verify_threshold: 0          # minimum survivors after S5-a gates to trigger the pass;
+                                    # lower = more aggressive (0 = always run); raise for
+                                    # small repos where one model call beats two separate ones
+
+step6_verify:
+  parallel: 7
+  progress_file: false              # write <state>/s6_progress/<run_id>/s6_progress.json after each verification
+  min_confidence: 5
+  max_budget_usd: 10.0              # forwarded only if the installed CLI supports --max-budget-usd
+  max_turns: 20
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+
+# **Beta — API only.** Exploit verification needs a Postman/OpenAPI/Swagger collection and
+# can only verify findings that map to an HTTP endpoint; everything else stays SAST-only.
+step6_exploit_verification:         # live "exploit verification" (EV) — OFF unless EV_API_COLLECTION is set
+  enabled: auto                     # auto = run when EV_API_COLLECTION is set (a local path to the API collection, from .env);
+                                    # true = REQUIRED (no collection → exit 2, so a scan never quietly returns an unverified report);
+                                    # false = forbidden (collection set → exit 2)
+  on_unreachable: drop              # drop | warn | abort  (abort only disables EV, never the SAST scan)
+  timeout_s: 15                     # per-request timeout (seconds) — the reachability probe AND every payload sent
+  safe_mode: true                   # gate destructive payloads (dropped by the attack-builder) and DELETE requests (see below)
+  allow_state_changing_methods: true   # let the agent send PUT/PATCH when a finding needs it
+                                    # (the method is often the hypothesis: "this endpoint
+                                    # also accepts PATCH"). Exploit verification is
+                                    # **not read-only**. `POST` is always permitted and
+                                    # all four shipped profiles set
+                                    # `allow_state_changing_methods: true` (the registered
+                                    # default is `false`), so an armed run can create
+                                    # records, trigger jobs and modify existing resources
+                                    # on the target. `DELETE` additionally requires
+                                    # `safe_mode: false`, which no shipped profile sets.
+  ev_overrides_static: false        # false (default): EV is additive — static verifies EVERY finding and owns the verdict + ranking CVSS; EV stamps its confirmation + advisory CVSS alongside. true = legacy: a hard deterministic proof overrides static and skips it
+  max_requests_per_finding: 300     # HTTP request cap per finding — ONE budget shared by the first set and the adaptive loop
+  max_payloads_per_finding: 50      # cap on deterministic payloads built per finding
+  rate_limit_rps: 0                 # request throttle (0 = off)
+  max_concurrency_target: 8         # in-flight requests to the target host, across every finding in the worker pool (0 = unlimited)
+  max_concurrency_endpoint: 4       # in-flight requests to any single endpoint — doubles as the burst budget a race/TOCTOU finding may use (0 = unlimited)
+  store_probes: false               # persist EVERY payload sent (not just confirmed) to the ev_probes table for replay/analysis; off by default — adds no model calls, only disk
+  parallel: 5                       # findings verified at once (worker pool; 1 = serial)
+  oob: auto                         # out-of-band listener: auto | on | off  (host via EV_OOB_URL)
+
+  # `vvaharness ev-replay` re-checks confirmed findings against a REDEPLOYED target:
+  ev_replay_variants: true          # when the stored tell is gone, try fresh same-subtype payloads before believing it fixed
+
+  # Credential freshness — EV re-mints a token that expires mid-run (see docs):
+  on_auth_failure: degrade          # degrade | abort | warn  when no credential can be established
+  auth_expiry_skew_s: 60            # refresh a token this many seconds before it expires
+  max_reauth: 3                     # run-wide budget for mid-run re-authentication
+
+  # ── per-module knobs ─────────────────────────────────────────────────────
+  # Same four names as models.exploit_verification, so "which model runs this" and
+  # "how it is tuned" line up. Only names that would COLLIDE at the top level live
+  # here: `parallel` above is findings-at-once, `max_turns` below is the attacker's
+  # loop rather than a mapping session's, and the only `max_tokens` is the judge's
+  # output cap. Everything with one meaning stays flat above.
+  classify:                         # HTTP-observability triage — one short call per batch
+    batch: 10                       # findings per call
+    parallel: 5                     # batches in flight
+  mapper:                           # endpoint→code, then finding→endpoint
+    max_turns: 20                   # tool round-trips per chunk (both stages)
+    parallel: 4                     # chunk sessions in flight (both stages)
+    endpoint_index:
+      chunk: 10                     # routes per session
+    finding_map:
+      chunk: 6                      # findings per session — smaller, each may read code
+      max_endpoints: 5              # ranked endpoint candidates kept per finding
+  attacker:                         # the adaptive payload loop
+    enabled: true                   # needs models.exploit_verification.attacker on a via:sdk, via:openai, or via:deepagents node
+    max_turns: 20                   # loop turn budget per finding
+    max_tool_result_chars: 12000    # per-tool-result cap — bounds context growth across turns
+  judge:                            # the independent confirmation authority
+    max_tokens: 4000                    # output cap for one ruling; a truncated reply loses the verdict
+    max_records: 24                 # transcript records handed over (baseline + most recent)
+  # Target + auth come from EV_* env, never here (see docs/exploit-verification.md):
+  #   EV_TARGET_URL, EV_AUTH_STRATEGY, EV_AUTH_TOKEN, EV_OOB_URL, ...
+
+step7_dedup:
+  line_tolerance: 5                 # trivial-dup line distance — default.yaml and full.yaml also ship
+                                    # 5; only sdk.yaml ships the registered default (3)
+  semantic: true
+  max_tokens: 64000
+
+step8:
+  max_tokens: 64000
+  timeout: 3600
+
+
+step_remediate:
+  enabled: false
+  enforce_policy: true
+  # Optional rule overrides; null uses the files bundled with the installation.
+  #policy_file: null
+ # playbook_file: null
+  top_n_findings: 5
+  max_budget_usd: 10.0              # per-finding value forwarded to compatible CLI builds if enabled
+  max_turns: 40                     # per-finding CLI-agent turn cap if enabled
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Edit
+    - Write
+
+    
+step_validate:
+  enabled: false
+  effort: high                      # Claude Agent SDK reasoning effort if enabled
+  max_turns: 50                     # validation-panel turn cap if enabled
+  max_budget_usd: 15.0              # validation-panel spend cap if enabled
+  max_findings: 20
+  allowed_tools:
+    - Read
+    - Grep
+    - Glob
+
+inject:
+  # Optional external context. Relative paths resolve against this profile's
+  # directory, not the target repo; use absolute paths in a copied profile.
+  # Missing files safely mean no injected CVEs, controls, or CMDB context.
+  # This packaged profile lives at vvaharness/config/profiles/, so these climb
+  # 3 levels back up to the shipped repo-root inputs/ directory (see
+  # docs/SETUP_GUIDE.md) — not ./inputs/, which would resolve inside profiles/.
+  cve_file:      ../../../inputs/known_cves.json
+  controls_file: ../../../inputs/design_controls.yaml
+  # CMDB exports. Optional: if unset or absent, VulContextSeverity environmental
+  # scoring is skipped (CVSS base + OffensivePriority are still computed).
+  cmdb_file:     ../../../inputs/cmdb.csv
+  # Remediation policy/playbook overrides (read by step_remediate's policy gate).
+  # Paths resolve against this config's directory; unset = bundled repo-root inputs/.
+  policy_file:    ./inputs/remediation_policy.yaml
+  playbook_file:  ./inputs/remediation_playbook.yaml
+batch:
+  git_token: ${GITHUB_TOKEN}
+  git_base_url: ${GIT_BASE_URL}
+  skip_repo_patterns:
+    - "*automation*"
+    - "*-playwright*"
+    - "*-selenium*"
+    - "*-karate*"
+    - "*perf-script*"
+    - "*perf-test*"
+    - "*test-buddy*"
+    - "*-e2e*"
+    - "*-mock-*"
+
+output:
+  preserve_on_cleanup: [security-scan, security-remediation]
+  # Step 9 ingest upload destination for report.md + report.sarif.
+  ingest_url: ${VVAHARNESS_INGEST_URL:-}
+  # Bool (true/false) or path to CA bundle used for ingest TLS verification.
+  ingest_verify: ${VVAHARNESS_INGEST_VERIFY:-true}
+  # Bearer token for ingest hub upload. Keep unset to skip upload.
+  ingest_token: ${VVAHARNESS_INGEST_TOKEN:-}
+  # ⑤ list files excluded from reachable-only catch-all review. The appendix
+  #    is rendered with the Markdown report after S8, before S9 emits SARIF.
+  #    Left ON so flipping catchall_deduct_lens_coverage back to false and
+  #    catchall_mode back to reachable_only restores the audit story in one
+  #    move; under the shipped deduct=true + mode=all combination the appendix
+  #    is expected to be empty.
+  emit_unreachable_appendix: true
+
+scan_progress:
+  # ── Real-time file/chunk-level progress tracking ────────────────────────
+  # Emits S0-S11 stage lifecycle lines plus detailed S1 discovery, S2 notes,
+  # S3 queueing, and S4 chunk/result/summary lines to stderr. Report output is
+  # unaffected.
+  #
+  # Environment variable override: VVAHARNESS_SCAN_PROGRESS_ENABLED=1
+  enabled: true
+  # compact: lifecycle lines plus notable file lists; verbose: every file;
+  # summary_only: only the final S4 summary block (which may span several lines);
+  # stage_only: only numbered stage start/done lines;
+  # llm_debug: verbose plus backend prompt payload traces for each LLM call.
+  style: verbose    # compact | verbose | summary_only | stage_only | llm_debug

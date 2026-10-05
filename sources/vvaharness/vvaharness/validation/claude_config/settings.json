@@ -1,0 +1,17 @@
+{
+  "model": "claude-opus-4-8[1m]",
+  "permissions": {
+    "allow": [
+      "Read", "Grep", "Glob"
+    ],
+    "deny": [
+      "Write", "Edit", "NotebookEdit",
+      "Bash"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {"type": "command", "command": "bash .claude/hooks/logging/capture_transcript.sh", "timeout": 30}
+    ]
+  }
+}

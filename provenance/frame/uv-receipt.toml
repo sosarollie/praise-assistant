@@ -1,0 +1,6 @@
+[tool]
+requirements = [{ name = "frame", extras = ["scan"], git = "https://github.com/lambdasec/frame" }]
+python = "3.13"
+entrypoints = [
+    { name = "frame", install-path = "/home/kali/.local/bin/frame", from = "frame" },
+]
