@@ -50,7 +50,7 @@ The lead is the top-level session. Workers have bounded contracts and do not inh
 | `pentest-skeptic-deep` | Explicitly escalated disputed judgment | `openai-codex/gpt-daybreak-blue-latest:max` |
 | `security-reviewer` | Bounded defensive source review, not final confirmation | `openai-codex/gpt-daybreak-blue-latest:high` |
 
-Routine judgment and patch lanes have Mimo/Grok alternates; escalated judgment has a Grok alternate. Selection excludes actual recorded producer families rather than assuming the spawning lead produced the finding. DeepSeek Flash/Pro share a family, as do GPT-family selectors. A configured selector is not proof of the model that served a request: each worker records its observed identity.
+Routine judgment and patch lanes have Mimo/GPT-6.1-Sol alternates; escalated judgment has a GPT-6.1-Sol alternate. Selection excludes actual recorded producer families rather than assuming the spawning lead produced the finding, and fails closed when no listed selector is outside those families. DeepSeek Flash/Pro share a family, as do GPT-family selectors. A configured selector is not proof of the model that served a request: each worker records its observed identity.
 
 Model availability and account entitlement are external prerequisites. There is no silent substitution or claim that these assignments have superior measured recall. Generic coding tasks outside an initialized engagement keep the normal OMP workflow.
 
@@ -215,3 +215,7 @@ Local dependencies, private evaluations, legacy archives, credentials, operation
 ## Reporting discipline
 
 Only independently confirmed cases are submission-ready. Include exact preconditions, clean reproduction steps, minimal redacted evidence, demonstrated impact, program-appropriate severity, and the relevant remediation invariant. Static-only conclusions must state their limitations. Keep duplicate causes together, respect every hop's scope, and never inflate severity to compensate for incomplete proof.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
