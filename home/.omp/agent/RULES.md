@@ -43,20 +43,21 @@ precedence over `task.agentModelOverrides`. Keep both mappings aligned. Reload
 extensions with `/reload` or restart OMP after changing the router; already-running
 agents retain their existing model.
 
-- Recon stays on Space Bunny; ordinary source discovery stays on DeepSeek Flash.
+- Recon and ordinary source discovery use DeepSeek V4.1 Flash at high reasoning.
 - Mimo gates candidates before expensive work. A rejected gate does not go to a
   PoC lane.
-- Routine planning uses DeepSeek V4.1 Flash at high reasoning. The lead uses
-  Codex Daybreak Blue at high reasoning; slow reasoning uses DeepSeek V4 Pro
-  at max. No explicit Sol selector is assigned to a pentesting role.
+- Engagement planning and the lead use Codex Daybreak Blue at high reasoning;
+  slow reasoning uses DeepSeek V4 Pro at max. No explicit Sol selector is
+  assigned to a pentesting role.
 - Gated ordinary PoCs use DeepSeek V4 Pro at high reasoning. Unresolved deep
   source analysis and gated chain escalation use Pro at max reasoning.
   Include the prior Flash pass's evidence and specific unresolved gap.
 - A bounded defensive source review uses Daybreak Blue through
   `security-reviewer`; this is analysis, not an independent final verdict.
 - Routine verdicts and patch checks stay on GLM Flash; deep adjudication uses
-  GLM at max, with a different-family alternate when needed. Flash and Pro
-  share the DeepSeek family and cannot independently judge one another.
+  Codex Daybreak Blue at max, with Grok as the different-family alternate.
+  Flash and Pro share the DeepSeek family and cannot independently judge one
+  another. Daybreak Blue and Sol share the GPT family and are not independent.
   The router filters against the parent; checkers must also verify the actual
   producer model in `agentschat.md` before issuing a verdict.
 

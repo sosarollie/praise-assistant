@@ -65,22 +65,26 @@ Candidates are not confirmed findings. A dropped candidate does not enter the pr
 
 Models in this table use the `opencode-go/` provider unless explicitly qualified otherwise. Reasoning levels are part of the selectors, not claims about the models actually serving future requests.
 
-| Role | Responsibility | Primary configured model |
+The pentest lead is the top-level OMP session, not a child agent: select Daybreak Blue explicitly at launch. The router pins `pentest-planner` and `security-reviewer` to Daybreak Blue; `pentest-skeptic-deep` uses Daybreak Blue subject to the independent-checker guard described below.
+
+| Role | Responsibility | Primary model / reasoning |
 |---|---|---|
-| `pentest-scout` | Broad scoped reconnaissance and candidate generation; never a verdict | `space-bunny-free:high` |
-| `pentest-planner` | Ranked hypotheses, coverage, and engagement plans | `deepseek-v4.1-flash:high` |
+| Pentest lead (top-level session) | Scope, coordination, prioritization, and handoffs; explicitly launched with Daybreak Blue | `openai-codex/gpt-daybreak-blue-latest:high` |
+| `security-reviewer` | Bounded defensive source review; not a final independent verdict | `openai-codex/gpt-daybreak-blue-latest:high` |
+| `pentest-scout` | Broad scoped reconnaissance and candidate generation; never a verdict | `deepseek-v4.1-flash:high` |
+| `pentest-planner` | Ranked hypotheses, coverage, and engagement plans | `openai-codex/gpt-daybreak-blue-latest:high` |
 | `pentest-finder` | Primary source discovery and input-to-sink traces | `deepseek-v4.1-flash:high` |
 | `pentest-finder-deep` | Bounded unresolved cross-file analysis after the ordinary pass | `deepseek-v4-pro:max` |
 | `pentest-verifier` | Mechanical pass/drop gate before costly proof work | `mimo-v2.6-flash:high` |
 | `pentest-exploiter` | Minimal working proof for a gated, reachable candidate | `deepseek-v4-pro:high` |
 | `pentest-exploiter-deep` | Gated multi-step proofs and attack chains | `deepseek-v4-pro:max` |
 | `pentest-skeptic` | Routine evidence-backed finding verdict | `glm-5.3-flash:high` |
-| `pentest-skeptic-deep` | Disputed severity, chain adjudication, or final second opinion | `glm-5.2:max` |
+| `pentest-skeptic-deep` | Disputed severity, chain adjudication, or final second opinion; different-family fallback when required | `openai-codex/gpt-daybreak-blue-latest:max` |
 | `pentest-tester` | Independent production exploitability and patch validation | `glm-5.3-flash:high` |
 
-Supporting mappings: generic `scout` uses `muse-spark-1.3-contributor:low`; `sonic` uses `space-bunny-free:low`; generic `task` is pinned to `space-bunny-free:high`. The bundled `security-reviewer` uses `openai-codex/gpt-daybreak-blue-latest:high` for bounded defensive source review; analysis is not a final independent verdict.
+Supporting mappings: generic `scout` uses `muse-spark-1.3-contributor:low`; `sonic` uses `space-bunny-free:low`; generic `task` is pinned to `space-bunny-free:high`.
 
-The ordinary skeptic and tester can select Mimo Flash or Grok 4.7 instead of GLM Flash when needed for parent-family separation. The deep skeptic can select Grok 4.7 instead of GLM 5.2. The router blocks an independent checker if no different-family selector is available. The checker must also compare its **observed** model against the actual finding producer recorded in the engagement log. DeepSeek Flash and Pro are one family; escalation from Flash to Pro is not independent validation.
+The ordinary skeptic and tester can select Mimo Flash or Grok 4.7 instead of GLM Flash when needed for parent-family separation. The deep skeptic's primary is Daybreak Blue at max reasoning, with Grok 4.7 at high as its alternate. A GPT-family parent (including Daybreak Blue or Sol) causes the router to select Grok rather than another GPT-family checker. The router blocks an independent checker if no different-family selector is available. Checkers must also compare their **observed** model against the actual finding producer recorded in the engagement log; parent-family filtering alone is not enough. Daybreak Blue and Sol are one GPT family, just as DeepSeek Flash and Pro are one DeepSeek family, so neither pair supplies independent validation of its own family.
 
 ### General model configuration versus the pentest lead
 

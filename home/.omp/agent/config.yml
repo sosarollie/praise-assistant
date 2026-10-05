@@ -16,15 +16,15 @@ task:
     security-reviewer: openai-codex/gpt-daybreak-blue-latest:high
     sonic: opencode-go/space-bunny-free:low
     pentest-tester: opencode-go/glm-5.3-flash:high
-    pentest-scout: opencode-go/space-bunny-free:high
-    pentest-planner: opencode-go/deepseek-v4.1-flash:high
+    pentest-scout: opencode-go/deepseek-v4.1-flash:high
+    pentest-planner: openai-codex/gpt-daybreak-blue-latest:high
     pentest-exploiter: opencode-go/deepseek-v4-pro:high
     pentest-skeptic: opencode-go/glm-5.3-flash:high
     pentest-finder: opencode-go/deepseek-v4.1-flash:high
     pentest-finder-deep: opencode-go/deepseek-v4-pro:max
     pentest-verifier: opencode-go/mimo-v2.6-flash:high
     pentest-exploiter-deep: opencode-go/deepseek-v4-pro:max
-    pentest-skeptic-deep: opencode-go/glm-5.2:max
+    pentest-skeptic-deep: openai-codex/gpt-daybreak-blue-latest:max
 providers:
   maxInFlightRequests:
     openai-codex: 3

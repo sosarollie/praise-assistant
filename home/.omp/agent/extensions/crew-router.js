@@ -12,11 +12,11 @@
  */
 
 const CREW = {
-  // Free tiers carry the volume. They are the rungs where a wrong answer costs a
-  // re-run rather than a wasted exploitation.
-  "pentest-scout": { models: ["opencode-go/space-bunny-free:high"], family: "free" },
+  // Flash carries bounded discovery; Daybreak Blue handles planning and gated
+  // adjudication. Precision-critical proofs remain on DeepSeek Pro.
+  "pentest-scout": { models: ["opencode-go/deepseek-v4.1-flash:high"], family: "deepseek" },
   scout: { models: ["opencode-go/muse-spark-1.3-contributor:low"], family: "muse" },
-  "pentest-planner": { models: ["opencode-go/deepseek-v4.1-flash:high"], family: "deepseek" },
+  "pentest-planner": { models: ["openai-codex/gpt-daybreak-blue-latest:high"], family: "gpt" },
   "pentest-finder": { models: ["opencode-go/deepseek-v4.1-flash:high"], family: "deepseek" },
   "pentest-finder-deep": { models: ["opencode-go/deepseek-v4-pro:max"], family: "deepseek" },
   "pentest-verifier": { models: ["opencode-go/mimo-v2.6-flash:high"], family: "mimo" },
@@ -33,8 +33,8 @@ const CREW = {
     independent: true,
   },
   "pentest-skeptic-deep": {
-    models: ["opencode-go/glm-5.2:max", "opencode-go/grok-4.7:high"],
-    family: "glm",
+    models: ["openai-codex/gpt-daybreak-blue-latest:max", "opencode-go/grok-4.7:high"],
+    family: "gpt",
     independent: true,
   },
   "pentest-tester": {
