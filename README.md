@@ -1,8 +1,8 @@
+<img width="1774" height="887" alt="PraiseAssistant_ Neon AI Avatar Network" src="https://github.com/user-attachments/assets/4e69c12c-01d1-4b0a-a5bd-ae67c5cba9cc" />
+
 # PraiseAssistant
 
-Evidence-driven orchestration for authorized bug bounty, penetration testing, and source review. PraiseAssistant combines an executable control CLI with an OMP multi-agent crew: explicit work stages, scoped requests, durable case state, shared communication, independent judgment, and reviewed workflow memory.
-
-It does not grant authorization, guarantee vulnerability discovery, train model weights, or replace an operating-system sandbox. Findings are not confirmed merely because a scanner or another agent calls them verified.
+Evidence-driven orchestration for authorized bug bounty, penetration testing, and source review. PraiseAssistant combines an executable control CLI with an OMP multi-agent crew: explicit work stages, scoped requests, durable case state, shared communication, independent judgment, and reviewed workflow memory. Findings are not confirmed merely because a scanner or another agent calls them verified.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ A supplied patch takes a separate validation path.
 - **Proof before reporting, not before discovery.** A credible source candidate can reach the gate without runtime reproduction. Confirmation requires two distinct clean-state reproductions and a different-family judgment.
 - **Local helpers are optional.** Their outputs enter the same evidence contract; they are neither shipped dependencies nor final authorities.
 
-## Agentic role distribution
+## Agentic role distribution (My personal setup)
 
 The lead is the top-level session. Workers have bounded contracts and do not inherit permission to expand scope.
 
