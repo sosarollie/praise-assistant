@@ -12,7 +12,16 @@ All roles are intended primarily for cybersecurity engagements and environments.
 - A configured lead launcher.
 - Role/model catalog generation for installed OMP integrations.
 
+## How Agents Communicate
+
+1. Initialize an engagement and register each participant with a role and observed model.
+2. Send an addressed JSON message to another registered agent.
+3. The recipient receives it either through live push or later inbox recovery.
+4. Work is delegated by scheduling a specialist through OMP and exchanging messages afterward.
+5. Use `project` to recover the append-only audit projection when needed.
+
 ## Repository Layout
+
 
 ```text
 praise/
