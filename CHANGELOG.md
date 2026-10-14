@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-14
+
+- Make `praise.json` the persistent source of truth for fixed-role model selections, dispatch, and lead startup; preserve selections on reinstallation.
+- Consolidate the public commands into `install`, `setAgent`, `getAgents`, and `startLeadAgent`; initialize or resume the exact requested engagement before launching its configured lead.
+- Install all nine specialist definitions with native delegation tools, canonical role topics, host-observed model provenance, and parent–child lineage.
+- Route native tasks and register workers automatically; deliver durable peer messages and parent lifecycle notifications without manual CLI coordination.
+- Replace the obsolete methodology and learning runtime with bounded JSON messaging, transactional schema-3 history migration, idempotent writes, and incremental audit recovery.
+- Package integration assets in the wheel and back up reversible legacy-file removals while preserving unrelated OMP settings.
+- Replace obsolete workflow tests with model persistence, scope isolation, delegation, delivery recovery, provenance, and installer rollback regressions.
+
+## Earlier development notes
 
 - Remove the active-scope tool-surface guard: shell, eval, write, edit, browser, network and filesystem access stay available inside an engagement. Scope tracking is retained for routing, data injection and the CLI-backed tools; the operator reviews agent actions.
 - Allow `read` to reach harness-internal read-only resources (`omp://`, `artifact://`, `agent://`, `history://`) that the path gate previously misclassified as out-of-scope host paths.

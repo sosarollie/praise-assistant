@@ -1,33 +1,26 @@
-"""PraiseAssistant: evidence-based, dependency-free pentest workflow control.
-
-The public local-helper interfaces are generic. OMP is the host, not a bundled
-binary. No role/model performance claims are made.
-"""
-
+"""Dependency-free, engagement-local coordination for native OMP agents."""
 from __future__ import annotations
 
 from . import policy, runtime
+from .config import ROLE_DESCRIPTIONS, ROLE_NAMES, dispatch, load_roles, set_role_model
+from .errors import PraiseError
 from .runtime import (
-    PraiseError,
     artifact,
     connect,
-    get_candidate,
+    inbox,
     init_engagement,
     load_scope,
-    model_family,
+    peers,
+    project_messages,
+    register_agent,
+    send_message,
+    show,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
-    "__version__",
-    "policy",
-    "runtime",
-    "PraiseError",
-    "init_engagement",
-    "load_scope",
-    "connect",
-    "artifact",
-    "model_family",
-    "get_candidate",
+    "__version__", "policy", "runtime", "PraiseError", "ROLE_NAMES", "ROLE_DESCRIPTIONS",
+    "load_roles", "set_role_model", "dispatch", "init_engagement", "load_scope", "connect",
+    "artifact", "register_agent", "send_message", "inbox", "peers", "project_messages", "show",
 ]

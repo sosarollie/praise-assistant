@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "praise"
-version = "0.1.0"
-description = "Evidence-driven orchestration for authorized multi-agent security work"
+version = "0.2.0"
+description = "Configured OMP role delegation and durable engagement-scoped JSON coordination"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
@@ -18,4 +18,4 @@ praise = "praise.cli:main"
 include = ["praise*"]
 
 [tool.setuptools.package-data]
-praise = ["roles.json"]
+praise = ["roles.json", "integration/RULES.md", "integration/agents/*.md", "integration/extensions/*.js", "integration/extensions/*.mjs", "integration/skills/*/*.md", "integration/skills/**/*"]

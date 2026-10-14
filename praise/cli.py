@@ -1,166 +1,114 @@
-"""PraiseAssistant command-line interface.
-
-JSON on stdout for success; a JSON ``{"error": ...}`` object on stderr with a
-nonzero exit code for every failure (fail closed). All subcommands use the same
-handlers as the resident, engagement-bound JSONL transport. No per-message
-interpreter startup and no shell execution.
-"""
-
+"""Praise role configuration, native OMP launch, and bounded JSON coordination."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 
-from . import policy, runtime
-from .runtime import PraiseError
+from . import config, installation, policy, runtime
+from .errors import PraiseError
 
+MAX_RPC_BYTES = 1024 * 1024
+RESIDENT_COMMANDS = frozenset(("scope", "register", "message", "inbox", "peers", "project", "show", "dispatch"))
 
 
 class _ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str):  # noqa: D401 - argparse hook
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+    def error(self, message):
         raise PraiseError(f"argument error: {message}")
 
 
+def _json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False)
 
 
 def _engagement_dir(args) -> str:
-    explicit = getattr(args, "engagement", None)
-    if explicit:
-        return os.path.abspath(explicit)
-    env = os.environ.get("PRAISEASSISTANT_ENGAGEMENT")
-    if env:
-        return os.path.abspath(env)
-    return os.path.abspath(os.getcwd())
+    return str(Path(args.engagement or os.environ.get("PRAISE_ENGAGEMENT") or os.getcwd()).expanduser().resolve())
 
 
-def _emit_error(exc: Exception) -> None:
-    sys.stderr.write(json.dumps({"error": str(exc)}, sort_keys=True) + "\n")
+def _cmd_install(args):
+    return installation.install(args.home, overwrite=args.overwrite, dry_run=args.dry_run, restore_backup=args.restore_backup)
 
 
-# --- command handlers ------------------------------------------------------
+def _cmd_set_agent(args):
+    return config.set_role_model(args.role, args.model)
 
 
-def _cmd_init(args):
-    return runtime.init_engagement(
-        args.directory,
-        program=args.program,
-        basis=args.basis,
-        assets=args.asset,
-        mode=args.mode,
-        methods=args.method,
-        max_requests=args.max_requests,
-        interval_seconds=args.interval,
-    )
+def _model_description(selector):
+    provider, _, name = selector.partition("/")
+    model, _, effort = name.partition(":")
+    return {"provider": provider, "name": model, "effort": effort or None}
+
+
+def _cmd_get_agents(args):
+    catalog = config.load_roles()
+    defaults = config.default_roles()["models"]
+    result = {"schema_version": 3, "roles": [
+        {"role": role, "model": catalog["models"][role], "model_description": _model_description(catalog["models"][role]),
+         "default_model": defaults[role], "description": config.ROLE_DESCRIPTIONS[role]}
+        for role in config.ROLE_NAMES
+    ]}
+    # A configured selector is not a participant's observed host model.
+    if args.engagement is not None:
+        runtime.load_scope(_engagement_dir(args))
+        result["participants"] = runtime.peers(_engagement_dir(args))
+    return result
 
 
 def _cmd_start_lead_agent(args):
-    init_result = runtime.init_engagement(
-        args.directory,
-        program=args.program,
-        basis=args.basis,
-        assets=args.asset,
-        mode=args.mode,
-        max_requests=args.max_requests,
-        interval_seconds=args.interval,
-        allowed_methods=args.method or ["GET"],
-    )
-    # launch native lead with remainder
-    inner = list(args.native_args or [])
-    if "--" in inner:
-        inner = inner[inner.index("--") + 1:]
-    lead_args = ["--engagement", init_result and args.directory, "lead", *inner]
-    # reuse native launcher path from _cmd_lead
-    args.native_args = inner
-    args.recover = None
-    return _cmd_lead(args)
-
-
-def _cmd_candidate(args):
-    finding = runtime.read_json_input(args.input)
-    if args.agent:
-        if not isinstance(finding, dict):
-            raise PraiseError("candidate input must be a JSON object")
-        finding["producer_agent"] = args.agent
-    return runtime.create_candidate(_engagement_dir(args), finding)
-
-
-def _cmd_show(args):
-    return runtime.show(_engagement_dir(args), args.candidate, compact=args.compact)
-
-
-def _cmd_gate(args):
-    return runtime.gate_candidate(
-        _engagement_dir(args), args.candidate, args.decision, args.reason, args.model, args.agent
-    )
-
-
-def _cmd_reproduce(args):
-    return runtime.add_reproduction(
-        _engagement_dir(args), args.candidate, args.run_id, args.clean_state, args.evidence, args.model, args.agent
-    )
-
-
-def _cmd_verdict(args):
-    return runtime.record_verdict(
-        _engagement_dir(args), args.candidate, args.decision, args.reason, args.model, args.evidence, args.agent
-    )
-
-
-def _cmd_dispatch(args):
-    return runtime.dispatch(
-        _engagement_dir(args), args.stage, args.candidate, args.escalated, args.reason,
-        tier=args.tier, packet=args.packet, attempt=args.attempt,
-    )
-
-
-def _cmd_packet(args):
-    try:
-        with open(args.input, "rb") as fh:
-            raw = fh.read(8193)
-        if len(raw) > 8192:
-            raise PraiseError("evidence packet exceeds 8192 UTF-8 bytes")
-        data = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise PraiseError(f"cannot read evidence packet input: {exc}") from exc
-    return runtime.create_packet(_engagement_dir(args), data, args.model, args.agent)
-
-
-def _cmd_review(args):
-    return runtime.record_review(
-        _engagement_dir(args), args.candidate, args.decision, args.reason, args.model, args.evidence, args.agent,
-    )
-
-
-def _cmd_lead(args):
-    passthrough = args.native_args
+    directory = str(Path(args.directory).expanduser().resolve())
+    passthrough = list(args.native_args)
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
     for arg in passthrough:
         key = arg.split("=", 1)[0]
-        if key in ("--model", "--provider", "--cwd", "--thinking") or key.startswith("--thinking-") or (
-            arg.startswith("-") and not arg.startswith("--") and len(arg) > 1 and arg[1] in "mpc"
+        if key in ("--model", "--provider", "--cwd", "--thinking", "--profile") or key.startswith("--thinking-") or (
+            arg.startswith("-m") and not arg.startswith("--")
         ):
-            raise PraiseError("lead passthrough cannot override model, provider, cwd, or thinking")
-    argv = runtime.lead_launch(_engagement_dir(args), args.recover) + passthrough
+            raise PraiseError("lead native arguments cannot override model, provider, cwd, thinking, or profile")
+    extension = config.agent_dir() / "extensions/praise-router.js"
+    if not extension.is_file():
+        raise PraiseError("installed Praise extension not found; run praise install first")
+    model = config.dispatch("lead")["model"]
+    if (Path(directory) / "scope.json").exists():
+        runtime.load_scope(directory)
+    else:
+        if not args.program or not args.basis or not args.asset:
+            raise PraiseError("new engagements require --program, --basis, and --asset")
+        runtime.init_engagement(directory, program=args.program, basis=args.basis, assets=args.asset,
+                                mode=args.mode or "source", methods=args.method, max_requests=args.max_requests,
+                                interval_seconds=args.interval)
+    argv = ["omp", "--cwd", directory, "--model", model, "-e", str(extension), *passthrough]
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:
         raise PraiseError(f"native lead launcher failed: {exc}") from exc
 
 
+def _cmd_dispatch(args):
+    runtime.load_scope(_engagement_dir(args))
+    return config.dispatch(args.role)
+
+
+def _cmd_scope(args):
+    return runtime.load_scope(_engagement_dir(args))
+
+
 def _cmd_register(args):
-    return runtime.register_agent(
-        _engagement_dir(args), args.session, args.name, args.role, args.model, args.candidate,
-    )
+    return runtime.register_agent(_engagement_dir(args), args.session, args.name, args.role, args.model,
+                                  parent=args.parent, observed=args.observed)
 
 
 def _cmd_message(args):
-    return runtime.send_message(
-        _engagement_dir(args), args.sender, args.model, args.to, args.kind, json.loads(args.data),
-        args.candidate, args.reply_to, args.evidence, args.key,
-    )
+    if len(args.data.encode("utf-8")) > 2048:
+        raise PraiseError("message data exceeds 2048 UTF-8 bytes")
+    return runtime.send_message(_engagement_dir(args), args.sender, args.model, args.to, args.kind,
+                                json.loads(args.data), reply_to=args.reply_to, evidence=args.evidence, key=args.key)
 
 
 def _cmd_inbox(args):
@@ -168,169 +116,102 @@ def _cmd_inbox(args):
 
 
 def _cmd_peers(args):
-    return runtime.peers(_engagement_dir(args), args.candidate)
-
-
-def _cmd_scope(args):
-    return runtime.load_scope(_engagement_dir(args))
-
-def _cmd_setrole(args):
-    return runtime.set_role_model(args.role, args.model)
+    return runtime.peers(_engagement_dir(args))
 
 
 def _cmd_project(args):
     return runtime.project_messages(_engagement_dir(args))
 
 
-def _cmd_request(args):
-    headers = None
-    if args.headers_file:
-        headers = runtime.read_json_input(args.headers_file)
-    elif args.headers_json:
-        try:
-            headers = json.loads(args.headers_json)
-        except json.JSONDecodeError as exc:
-            raise PraiseError(f"invalid --headers-json: {exc}") from exc
-    return runtime.perform_request(
-        _engagement_dir(args),
-        args.url,
-        args.method,
-        args.role,
-        args.model,
-        args.candidate,
-        args.clean_state,
-        headers,
-        args.body,
-    )
+def _cmd_show(args):
+    return runtime.show(_engagement_dir(args))
 
 
-def _cmd_validate_fix(args):
-    gates = runtime.read_json_input(args.input)
-    return runtime.validate_fix(_engagement_dir(args), args.candidate, args.model, gates, args.agent)
-
-
-# --- parser ----------------------------------------------------------------
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = _ArgumentParser(
-        prog="praise",
-        description="Cross-agent role and communication control: JSON messages, registration, "
-        "inboxes, and engagement-scoped state.",
-    )
-    parser.add_argument(
-        "--engagement",
-        dest="engagement",
-        default=None,
-        help="Engagement directory (default: $PRAISEASSISTANT_ENGAGEMENT or the current directory)",
-    )
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
-
-    p = sub.add_parser("init", help="Initialize an engagement directory")
-    p.add_argument("--directory", required=True, help="Absolute engagement directory to create")
-    p.add_argument("--program", required=True, help="Program name")
-    p.add_argument("--basis", required=True, help="Authorization basis")
-    p.add_argument("--asset", action="append", required=True, help="Allowed asset (repeatable)")
-    p.add_argument("--mode", choices=list(policy.ALLOWED_MODES), default="source")
-    p.add_argument("--max-requests", type=int, default=0, help="Request budget (default 0)")
-    p.add_argument("--interval", type=float, default=1.0, help="Throttle seconds (default 1.0)")
-    p.add_argument("--method", action="append", help="Allowed method (repeatable; default GET)")
-    p.set_defaults(func=_cmd_init)
-
-
-    p = sub.add_parser("lead", help="Operator-only configured Lead launcher; no provider fallback")
-    p.add_argument("--recover", type=int, help="Explicit durable configured Lead execution-failure close sequence")
-    p.add_argument("native_args", nargs=argparse.REMAINDER, help="Native omp flags after --")
-    p.set_defaults(func=_cmd_lead)
-
-    p = sub.add_parser("scope", help="Read scope without case or chat history")
+def _build_parser():
+    parser = _ArgumentParser(prog="praise", description=__doc__)
+    parser.add_argument("--engagement", help="Explicit engagement directory for coordination")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("install", help="Install packaged OMP integration with backups")
+    p.add_argument("--home", type=Path, help="Install into HOME/.omp/agent instead of the selected OMP profile")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--restore-backup", type=Path)
+    p.set_defaults(func=_cmd_install)
+    p = sub.add_parser("setAgent", help="Configure one canonical role's model selector")
+    p.add_argument("--role", choices=config.ROLE_NAMES, required=True)
+    p.add_argument("--model", required=True)
+    p.set_defaults(func=_cmd_set_agent)
+    p = sub.add_parser("getAgents", help="List configured roles; participants only with --engagement")
+    # Permit the public documented form `getAgents --engagement DIR` as well.
+    p.add_argument("--engagement", default=argparse.SUPPRESS)
+    p.set_defaults(func=_cmd_get_agents)
+    p = sub.add_parser("startLeadAgent", help="Initialize or resume an engagement and start its configured native lead")
+    p.add_argument("--directory", required=True)
+    p.add_argument("--program")
+    p.add_argument("--basis")
+    p.add_argument("--asset", action="append")
+    p.add_argument("--mode", choices=policy.ALLOWED_MODES)
+    p.add_argument("--method", action="append")
+    p.add_argument("--max-requests", type=int, default=0)
+    p.add_argument("--interval", type=float, default=1.0)
+    p.add_argument("native_args", nargs=argparse.REMAINDER, help="Native OMP arguments after --")
+    p.set_defaults(func=_cmd_start_lead_agent)
+    p = sub.add_parser("scope")
     p.set_defaults(func=_cmd_scope)
-
-    p = sub.add_parser("register", help="Bind a session to a short engagement-local agent id")
+    p = sub.add_parser("register")
     p.add_argument("--session", required=True)
     p.add_argument("--name", required=True)
-    p.add_argument("--role", required=True, choices=["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"])
+    p.add_argument("--role", choices=config.ROLE_NAMES, required=True)
     p.add_argument("--model", required=True)
-    p.add_argument("--candidate")
+    p.add_argument("--parent")
+    p.add_argument("--observed", action="store_true")
     p.set_defaults(func=_cmd_register)
-
-    p = sub.add_parser("message", help="Send a scoped JSON message")
-    p.add_argument("--from", dest="sender", required=True)
+    p = sub.add_parser("message")
+    p.add_argument("--sender", required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--to", required=True)
-    p.add_argument("--kind", required=True, choices=["ask", "reply", "close"])
-    p.add_argument("--data", required=True, help="JSON object; at most 2048 UTF-8 bytes")
-    p.add_argument("--candidate")
+    p.add_argument("--kind", choices=("ask", "reply", "close"), required=True)
+    p.add_argument("--data", required=True)
     p.add_argument("--reply-to", type=int)
     p.add_argument("--evidence", action="append", default=[])
-    p.add_argument("--key", help="Idempotency key; changed content fails closed")
+    p.add_argument("--key")
     p.set_defaults(func=_cmd_message)
-
-    p = sub.add_parser("inbox", help="Read addressed messages after a durable sequence")
+    p = sub.add_parser("inbox")
     p.add_argument("--agent", required=True)
     p.add_argument("--after", type=int, default=0)
     p.add_argument("--limit", type=int, default=32)
     p.set_defaults(func=_cmd_inbox)
-
-    p = sub.add_parser("peers", help="Read a bounded scoped agent roster")
-    p.add_argument("--candidate")
+    p = sub.add_parser("peers")
     p.set_defaults(func=_cmd_peers)
-
-    p = sub.add_parser("project", help="Recover the append-only audit projection")
+    p = sub.add_parser("project")
     p.set_defaults(func=_cmd_project)
-
-    p = sub.add_parser("setrole", help="Change the model assigned to an existing role")
-    p.add_argument("--role", required=True)
-    p.add_argument("--model", required=True, help="Model selector")
-    p.set_defaults(func=_cmd_setrole)
-
-    p = sub.add_parser("setAgent", help="Bind a session to an engagement agent id")
-    p.add_argument("--session", required=True)
-    p.add_argument("--name", required=True)
-    p.add_argument("--role", required=True, choices=["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"])
-    p.add_argument("--model", required=True)
-    p.add_argument("--candidate")
-    p.set_defaults(func=_cmd_register)
-
-    p = sub.add_parser("getAgents", help="Read a bounded scoped agent roster")
-    p.add_argument("--candidate")
-    p.set_defaults(func=_cmd_peers)
-
-    p = sub.add_parser("startLeadAgent", help="Initialize an engagement and start the configured lead")
-    p.add_argument("--directory", required=True, help="Absolute engagement directory to create")
-    p.add_argument("--program", required=True, help="Program name")
-    p.add_argument("--basis", required=True, help="Authorization basis")
-    p.add_argument("--asset", action="append", required=True, help="Allowed asset (repeatable)")
-    p.add_argument("--mode", choices=list(policy.ALLOWED_MODES), default="source")
-    p.add_argument("--max-requests", type=int, default=0, help="Request budget (default 0)")
-    p.add_argument("--interval", type=float, default=1.0, help="Throttle seconds (default 1.0)")
-    p.add_argument("--method", action="append", help="Allowed method (repeatable; default GET)")
-    p.add_argument("--recover", type=int, help="Explicit durable configured Lead execution-failure close sequence")
-    p.add_argument("native_args", nargs=argparse.REMAINDER, help="Native omp flags after --")
-    p.set_defaults(func=_cmd_start_lead_agent)
-
-
-    sub.add_parser("serve", help="Bound resident JSONL transport; no network listener")
-
+    p = sub.add_parser("show")
+    p.set_defaults(func=_cmd_show)
+    p = sub.add_parser("dispatch")
+    p.add_argument("--role", choices=config.ROLE_NAMES, required=True)
+    p.set_defaults(func=_cmd_dispatch)
+    sub.add_parser("serve", help="Engagement-bound resident JSONL coordination transport")
     return parser
 
 
-
-
-# --- entrypoint ------------------------------------------------------------
-
-
-MAX_RPC_BYTES = 1024 * 1024
-
-
 def _execute(args):
-    func = getattr(args, "func", None)
-    if func is None:
-        raise PraiseError("no command specified")
-    return func(args)
+    return args.func(args)
 
 
-def _serve(directory: str, parser: argparse.ArgumentParser) -> int:
+def _emit_error(exc):
+    sys.stderr.write(_json({"error": str(exc)}) + "\n")
+
+
+def _project_committed(directory, result):
+    if isinstance(result, dict) and result.get("_messages"):
+        try:
+            runtime.project_messages(directory)
+        except Exception as exc:
+            sys.stderr.write(f"Committed messages need audit recovery: {type(exc).__name__}\n")
+            sys.stderr.flush()
+
+
+def _serve(directory, parser):
     runtime.load_scope(directory)
     while True:
         line = sys.stdin.buffer.readline(MAX_RPC_BYTES + 1)
@@ -339,40 +220,30 @@ def _serve(directory: str, parser: argparse.ArgumentParser) -> int:
         if len(line) > MAX_RPC_BYTES or not line.endswith(b"\n"):
             _emit_error(PraiseError("resident request exceeds the JSONL frame limit"))
             return 1
-        request_id = None
-        result = None
+        request_id, result = None, None
         try:
             request = json.loads(line)
             if not isinstance(request, dict) or type(request.get("id")) is not int:
                 raise PraiseError("resident request requires an integer id")
             request_id = request["id"]
             argv = request.get("args")
-            if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+            if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
                 raise PraiseError("resident request requires command arguments")
-            if argv[0] in ("init", "serve", "lead") or any(
-                a in ("--engagement", "--help", "-h") or a.startswith("--engagement=") for a in argv
-            ):
-                raise PraiseError("resident transport is bound to one engagement")
-            args = parser.parse_args(["--engagement", directory, *argv])
-            result = _execute(args)
-            response = {"id": request_id, "ok": True, "data": result}
-            encoded = runtime._json(response)
+            if argv[0] not in RESIDENT_COMMANDS or any(arg in ("--engagement", "--help", "-h") or arg.startswith("--engagement=") for arg in argv):
+                raise PraiseError("resident transport allows internal coordination commands only and is bound to one engagement")
+            result = _execute(parser.parse_args(["--engagement", directory, *argv]))
+            encoded = _json({"id": request_id, "ok": True, "data": result})
             if len(encoded.encode("utf-8")) > MAX_RPC_BYTES:
-                raise PraiseError("resident response exceeds the JSONL frame limit; request compact data")
-        except Exception as exc:  # no command retry: a mutation may already have committed
-            error = str(exc) if isinstance(exc, (PraiseError, json.JSONDecodeError)) else f"{type(exc).__name__}: {exc}"
-            encoded = runtime._json({"id": request_id, "ok": False, "error": error})
+                raise PraiseError("resident response exceeds the JSONL frame limit")
+        except Exception as exc:
+            # Never replay: the operation may already have committed.
+            encoded = _json({"id": request_id, "ok": False, "error": str(exc)})
         sys.stdout.write(encoded + "\n")
         sys.stdout.flush()
-        if isinstance(result, dict) and result.get("_messages"):
-            try:
-                runtime.project_messages(directory)
-            except Exception as exc:
-                sys.stderr.write(f"Committed messages need audit recovery: {type(exc).__name__}\n")
-                sys.stderr.flush()
+        _project_committed(directory, result)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
@@ -383,26 +254,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "serve":
             return _serve(_engagement_dir(args), parser)
         result = _execute(args)
-    except (PraiseError, json.JSONDecodeError) as exc:
+        if result is not None:
+            sys.stdout.write(_json(result) + "\n")
+            sys.stdout.flush()
+            _project_committed(_engagement_dir(args), result)
+        return 0
+    except Exception as exc:
         _emit_error(exc)
         return 1
-    except json.JSONDecodeError as exc:
-        _emit_error(PraiseError(f"invalid JSON: {exc}"))
-        return 1
-    except Exception as exc:
-        _emit_error(PraiseError(f"{type(exc).__name__}: {exc}"))
-        return 1
-    if result is None:
-        return 0
-    sys.stdout.write(runtime._json(result) + "\n")
-    sys.stdout.flush()
-    if result.get("_messages"):
-        try:
-            runtime.project_messages(_engagement_dir(args))
-        except Exception as exc:
-            sys.stderr.write(f"Committed messages need audit recovery: {type(exc).__name__}\n")
-    return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,272 +1,127 @@
 # Praise
 
-Praise is a lightweight, communication-focused multi-agent coordination layer for OMP.
-All roles are intended primarily for cybersecurity engagements and environments.
+Praise coordinates specialized AI agents in **cybersecurity engagements and environments**. A lead delegates bounded tasks to fixed specialist roles, and any specialist can delegate to another when its expertise is needed.
 
-## What Praise Provides
+Praise selects each role's configured provider/model, registers the agent's host-observed identity, preserves parent–child relationships, and automatically delivers startup, completion, and peer messages inside the engagement. Agents use OMP's native task tool and Praise's communication tools; users configure the models and start the lead.
 
-- One engagement-bound SQLite state store.
-- Agent registration with short local ids such as `a1`, `a2`.
-- Addressed JSON messages: `ask`, `reply`, and `close`.
-- Durable inboxes and audit projection recovery.
-- A configured lead launcher.
-- Role/model catalog generation for installed OMP integrations.
+## Install
 
-## Repository Layout
-
-
-```text
-praise/
-  roles.json               # Source of truth for lead, communication roles, models
-  cli.py                   # CLI commands
-  runtime.py               # State, registration, messaging, scope
-  policy.py                # Engagement asset validation
-  evidence.py              # Evidence hashing helpers
-scripts/
-  install.py               # Installs OMP integration
-home/.omp/agent/           # Owned OMP roles, extension, skills, rules
-```
-
-## Prerequisites
-
-- Python 3.11 or newer.
-- OMP installed and authenticated with your providers.
-- Recommended OMP version: 18.6.1.
-
-## Installation
+Requires Linux, Python 3.11+, and [OMP](https://github.com/can1357/oh-my-pi) with authenticated providers. The integration is exercised with OMP 18.10.2.
 
 ```sh
-cd /home/kali/Projects/praise-LLM-Assistant
+git clone https://github.com/sosarollie/praise-assistant.git
+cd praise-assistant
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
-python scripts/install.py
-export PATH="$HOME/.local/bin:$PATH"
-praise --help
+python -m pip install .
+praise install
 ```
 
-The installer deploys owned roles, extension files, workflow skills, rules, and the `praise` launcher.
+Keep this Python environment available: the installed launcher uses it. Add `$HOME/.local/bin` to `PATH` when using the launcher outside the activated environment.
 
-## Engagement Setup
+## Configure providers and models
 
-Initialize one engagement directory per coordination boundary.
+Authenticate the providers you intend to use with `omp login` or their supported API-key environment variables. Use `omp models` to check available model identifiers.
+
+**Choose a provider and model for every role before starting an engagement.** The table below is our workspace recommendation; `getAgents` shows your current selections.
 
 ```sh
-export ENGAGEMENT="$HOME/pentest-workspace/my-project"
-mkdir -p "$ENGAGEMENT"
-praise init --directory "$ENGAGEMENT" \
-  --program 'Coordination project' \
-  --basis 'Agreed scope and operating rules' \
-  --asset '/absolute/source/or/url' \
-  --mode source
+praise getAgents
+praise setAgent --role finder --model openai/gpt-4.1
+praise getAgents
 ```
 
-## Provider and Model Configuration
+Selectors use `provider/model[:effort]`. Provider prefixes such as `openai`, `anthropic`, `google`, `opencode-go`, and `openai-codex` refer to OMP's configured providers. Authenticate the matching provider; an OpenAI API-key provider and the Codex login provider are separate choices.
 
-Praise maps roles to
-model selectors in `praise/roles.json` and updates `~/.omp/agent/config.yml`.
+Selections are saved atomically in `~/.omp/agent/praise.json`. Dispatch and lead startup read that same file. Reinstallation preserves selections, and changes apply to newly started agents. Existing sessions keep their bound identity; restart the lead to change its running model. Unavailable selections produce an error rather than a different model being substituted.
 
-### 1. Edit `praise/roles.json`
+### Fixed roles and workspace recommendations
 
-This is the source of truth for role and model assignment.
+| Role | Specialization | Provider | Recommended model |
+|---|---|---|---|
+| `lead` | Coordinate scope, specialist assignments, progress, and final synthesis | `opencode-go` | `cat-jam-free:xhigh` |
+| `planner` | Plan the authorized work, dependencies, and bounded task slices | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `scout` | Map supplied surfaces and locate relevant code or artifacts | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `finder` | Investigate security issues and trace source evidence | `opencode-go` | `deepseek-v4.1-flash:high` |
+| `verifier` | Check evidence, reachability, and security invariants | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `exploiter` | Develop minimal reproductions within explicit authorization | `opencode-go` | `deepseek-v4.1-flash:high` |
+| `skeptic` | Challenge conclusions, assumptions, and alternative explanations | `opencode-go` | `glm-5.3-flash:high` |
+| `reviewer` | Independently review conclusions and supporting artifacts | `openai-codex` | `gpt-daybreak-blue-latest:high` |
+| `tester` | Validate proposed changes against the assigned requirements | `opencode-go` | `longcat-2.5-preview-free:high` |
 
-```json
-{
-  "schema_version": 2,
-  "lead_model": "opencode-go/cat-jam-free:xhigh",
-  "lead_recovery_model": "opencode-go/cat-jam-free:xhigh",
-  "stages": {},
-  "escalations": {},
-  "experts": {},
-  "roles": {
-    "planner": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "scout": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "finder": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
-    "verifier": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "exploiter": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
-    "skeptic": {"models": ["opencode-go/glm-5.3-flash:high"], "independent": true},
-    "reviewer": {"models": ["openai-codex/gpt-daybreak-blue-latest:high"], "independent": true},
-    "tester": {"models": ["opencode-go/longcat-2.5-preview-free:high"], "independent": true}
-  }
-}
-```
+Roles are fixed; users select the models assigned to them. Assign different model families when your engagement requires independent review.
 
-Guidelines:
+## Start an engagement
 
-- Set `lead_model` to the model you want as session lead.
-- Add one role per responsibility in your workflow.
-- Use the smallest suitable model for each role.
-- Use different families when you want independent judgment.
-- Re-run `python scripts/install.py --overwrite` after changing this file.
-
-### 2. Common provider selectors
-
-Use provider prefixes that match your OMP installation, for example:
-
-- `openai/...`
-- `anthropic/...`
-- `google/...`
-- `opencode-go/...`
-- `openai-codex/...`
-
-Examples:
-
-```json
-"models": ["anthropic/claude-sonnet-4-5"]
-"models": ["openai/gpt-4.1"]
-"models": ["google/gemini-2.5-pro"]
-```
-
-### 3. Customize OMP role overrides
-
-After installation, `~/.omp/agent/config.yml` contains generated role overrides:
-
-```yaml
-task:
-  agentModelOverrides:
-    planner: opencode-go/longcat-2.5-preview-free:high
-    scout: opencode-go/longcat-2.5-preview-free:high
-    finder: opencode-go/deepseek-v4.1-flash:high
-    verifier: opencode-go/longcat-2.5-preview-free:high
-    exploiter: opencode-go/deepseek-v4.1-flash:high
-    skeptic: opencode-go/glm-5.3-flash:high
-    reviewer: openai-codex/gpt-daybreak-blue-latest:high
-    tester: opencode-go/longcat-2.5-preview-free:high
-```
-
-You may adjust these manually. Avoid assigning a higher-cost model when a lighter model
-can perform the same communication task.
-
-## Selecting Models For Existing Roles
-
-## Roles And Recommended Providers
-
-| Role | Used For | Recommended Provider / Model (this workspace) |
-|---|---|---|
-| `lead` | Top-level scope, scheduling, coordination, synthesis | `opencode-go/cat-jam-free:xhigh` |
-| `planner` | Hypothesis planning | `opencode-go/longcat-2.5-preview-free:high` |
-| `scout` | Surface mapping | `opencode-go/longcat-2.5-preview-free:high` |
-| `finder` | Source paths and invariants | `opencode-go/deepseek-v4.1-flash:high` |
-| `verifier` | Evidence reachability sanity | `opencode-go/longcat-2.5-preview-free:high` |
-| `exploiter` | Controlled reproduction | `opencode-go/deepseek-v4.1-flash:high` |
-| `skeptic` | Independent verdict | `opencode-go/glm-5.3-flash:high` |
-| `reviewer` | Final review | `openai-codex/gpt-daybreak-blue-latest:high` |
-| `tester` | Fix and alternate-path validation | `opencode-go/longcat-2.5-preview-free:high` |
-
-Lead model in pipeline:
-```text
-CatJam Lead
-    |
-    v
-LongCat Planner
-    |
-    v
-LongCat Scout
-    |
-    v
-DeepSeek Finder
-    |
-    v
-LongCat Verifier
-    |
-    v
-DeepSeek Exploiter
-    |
-    v
-GLM Skeptic
-    |
-    v
-Daybreak Review
-    |
-    v
-LongCat Tester
-```
-
-These are the fixed roles available in this implementation. Users may change the model
-assigned to any role, but should keep the role definitions themselves unchanged.
-
-Current roles:
-
-- `lead`
-- `planner`
-- `scout`
-- `finder`
-- `verifier`
-- `exploiter`
-- `skeptic`
-- `reviewer`
-- `tester`
-
-To change a role model:
-
-1. Update `praise/roles.json`:
-
-```json
-"planner": {
-  "models": ["openai/gpt-4.1"]
-}
-```
-
-2. Re-run the installer:
+For an owned local source directory:
 
 ```sh
-python scripts/install.py --overwrite
+praise startLeadAgent \
+  --directory "$HOME/pentest-workspace/my-engagement" \
+  --program 'Owned source review' \
+  --basis 'Authorized analysis of this local source' \
+  --asset "$PWD"
 ```
 
-3. Assign the matching model when registering:
+This initializes the engagement and opens the configured lead chat. Give the lead your objective; it can assign specialists without manual registration or message commands. Specialist definitions include native delegation tools, subject to OMP's depth and concurrency limits. The default depth of two supports a lead delegating to a worker that delegates to another specialist.
+
+Resume an existing engagement with:
 
 ```sh
-praise --engagement "$ENGAGEMENT" register \
-  --session s1 --name worker-a --role lead \
-  --model openai/gpt-4.1
+praise startLeadAgent --directory "$HOME/pentest-workspace/my-engagement"
 ```
 
-The model selected at registration becomes the observed model for that participant.
-
-## Automation
-
-Praise is designed for agent-driven communication, not manual user command entry. Once OMP
-workers are scheduled, they invoke the communication tools themselves and messages are
-delivered automatically into the recipient session at safe execution boundaries or
-through durable inbox recovery.
-
-Praise does not auto-start workers or invent messages by itself. Delegation is performed
-through OMP task scheduling: the lead assigns a specialist subagent with a
-PraiseAssistant-Task metadata header, the specialist registers when it starts,
-and communication then happens automatically through Praise messages. Scheduling and
-message content remain agent-controlled to keep coordination explicit and safe.
-Humans usually only initialize the engagement and launch the lead.
-
-## Changing A Role Model
+Native OMP options or a non-interactive prompt can follow `--`:
 
 ```sh
-praise setrole --role finder --model openai/gpt-4.1
+praise startLeadAgent --directory "$HOME/pentest-workspace/my-engagement" \
+  -- -p 'Inspect the supplied source and delegate a bounded evidence check.'
 ```
 
-This updates the installed role catalog and generated OMP model override.
+Each engagement keeps its scope, `state.sqlite3`, append-only `agentschat.md`, and `evidence/` together. Supply exact authorized assets and account boundaries; scope records and messages are coordination data, not testing permission.
 
 ## Commands
 
-```text
-python scripts/install.py                Installation command
-setAgent                                 Register or update an agent
-getAgents                                List registered agents
-startLeadAgent                           Start the configured lead and begin coordination
-setrole                                  Change the model assigned to an existing role
-```
+| Command | Purpose |
+|---|---|
+| `praise install` | Install the packaged agent definitions, extension, and coordination skill |
+| `praise setAgent --role ROLE --model SELECTOR` | Persist the model selection for one fixed role |
+| `praise getAgents` | Show configured roles, models, and specializations |
+| `praise getAgents --engagement DIR` | Also show registered participants, parent relationships, and model provenance |
+| `praise startLeadAgent --directory DIR` | Initialize or resume an engagement and start the configured lead |
 
-## Tests
+Configured selectors and registered participants are distinct. A manually asserted selector is labeled `asserted`; OMP-derived identity is labeled `host`. A participant record is history, not proof that a worker is currently running.
+
+## Upgrade and recovery
+
+Stop running workers, install the updated package, then run:
 
 ```sh
-python -m unittest tests.test_install
+praise install --dry-run
+praise install --overwrite
 ```
 
-## Notes
+The installer prints its backup path. It migrates previous role selections, removes obsolete owned integration files, and preserves unrelated OMP settings. Restart OMP after installation; existing sessions retain loaded extensions.
 
-- Praise messages are coordination data, not authorization.
-- Keep secrets and raw target data out of messages.
-- Do not reuse another engagement's records or accounts.
+Restore an installation with:
+
+```sh
+praise install --restore-backup /absolute/path/to/printed-backup
+```
+
+Rollback refuses to erase files changed since installation. Engagement histories are preserved by the transactional schema-3 migration; keep a consistent engagement backup before upgrading. Installation rollback restores deployed files, not an engagement database.
+
+For an isolated OMP agent directory, set `PI_CODING_AGENT_DIR` before installation and use the same value for subsequent Praise and OMP commands. `praise install --home /path/to/test-home` is available for isolated installation checks.
+
+## Development checks
+
+```sh
+python -m unittest discover -s tests -p 'test_*.py'
+node --test tests/router.test.mjs
+```
+
+The Python package includes its integration assets, so wheel installations use the same installer as source checkouts.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Praise is licensed under the [MIT License](LICENSE).

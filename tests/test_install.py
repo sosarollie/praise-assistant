@@ -1,70 +1,196 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.install import atomic_write, digest, model_settings, rollback, safe
+from praise import config, installation
+from praise.errors import PraiseError
+
+
+@contextmanager
+def packaged_resources():
+    """Small installation payload for failure and rollback controls."""
+    defaults = config.role_bytes(config.default_roles())
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        files = {"roles.json": defaults, "integration/RULES.md": b"Rules\n",
+                 "integration/extensions/praise-router.js": b"router\n",
+                 "integration/extensions/json-client.mjs": b"client\n",
+                 "integration/skills/praise-coordination/SKILL.md": b"coordination\n"}
+        files.update({f"integration/agents/{role}.md": role.encode() for role in config.ROLE_NAMES})
+        for name, data in files.items():
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        with patch("importlib.resources.files", return_value=root):
+            yield
 
 
 class InstallTests(unittest.TestCase):
-    def test_owned_model_updates_preserve_other_settings(self):
-        source = 'theme:\n  dark: custom\ntask:\n  concurrency: 2\n  agentModelOverrides:\n    custom-worker: vendor/custom\n    pentest-finder: vendor/old\n  worktrees: false\nworkspace:\n  label: existing\n'
-        result = model_settings(source, {'roles': {'pentest-finder': {'models': ['vendor/new']}}}).decode()
-        self.assertIn('    custom-worker: vendor/custom\n', result)
-        self.assertIn('    pentest-finder: vendor/new\n', result)
-        self.assertNotIn('vendor/old', result)
-        self.assertIn('  worktrees: false\nworkspace:\n  label: existing\n', result)
-        self.assertIn('  concurrency: 2\n', result)
-        self.assertIn('theme:\n  dark: custom\n', result)
-        self.assertEqual(model_settings(result, {'roles': {'pentest-finder': {'models': ['vendor/new']}}}).decode(), result)
+    def test_owned_yaml_cleanup_is_precisely_scoped_and_idempotent(self):
+        source = 'theme:\n  finder: custom\ntask:\n  concurrency: 2\n  agentModelOverrides:\n    custom-worker: vendor/custom\n    pentest-finder: vendor/old\n    finder: vendor/also-old\n  worktrees: false\nworkspace:\n  finder: existing\n'
+        result = installation.model_settings(source).decode()
+        expected = source.replace('    pentest-finder: vendor/old\n', '').replace('    finder: vendor/also-old\n', '')
+        self.assertEqual(result, expected)
+        self.assertEqual(installation.model_settings(result).decode(), result)
+        emptied = installation.model_settings('task:\n  agentModelOverrides:\n    finder: vendor/old\n').decode()
+        self.assertEqual(emptied, 'task:\n  agentModelOverrides: {}\n')
+        self.assertEqual(installation.model_settings(emptied).decode(), emptied)
+        self.assertEqual(installation.model_settings('theme: &theme {finder: custom}\n'), b'theme: &theme {finder: custom}\n')
+        crlf = 'theme: custom\r\ntask:\r\n  agentModelOverrides:\r\n    finder: vendor/old\r\n    custom: vendor/kept\r\n'
+        self.assertEqual(installation.model_settings(crlf), crlf.replace('    finder: vendor/old\r\n', '').encode())
 
-    def test_complex_settings_fail_without_silently_overwriting(self):
-        for source in ('task: {agentModelOverrides: {custom: model}}\n', 'task:\n  agentModelOverrides: {custom: model}\n', 'task:\ntask:\n'):
-            with self.subTest(source=source), self.assertRaises(ValueError):
-                model_settings(source, {'roles': {'worker': {'models': ['vendor/model']}}})
+    def test_unsafe_yaml_forms_are_refused(self):
+        cases = ('task: {agentModelOverrides: {finder: model}}\n', 'task:\n  agentModelOverrides: {custom: model}\n', 'task:\ntask:\n', 'task: *alias\n', 'task:\n  <<: *other\n', 'task:\n  agentModelOverrides:\n    finder: &model vendor/a\n', 'task:\n  agentModelOverrides:\n    finder: vendor/a\n    finder: vendor/b\n', 'task:\n  agentModelOverrides:\n    finder: |\n      vendor/a\n', '"task":\n  agentModelOverrides:\n    finder: vendor/a\n')
+        for source in cases:
+            with self.subTest(source=source), self.assertRaises(PraiseError):
+                installation.model_settings(source)
 
-    def test_rollback_restores_old_bytes_and_removes_owned_new_files(self):
+
+    def test_reinstall_preserves_choices_and_unrelated_settings(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            installation.install(home)
+            config.set_role_model('finder', 'custom/new-model:xhigh', home)
+            directory = config.agent_dir(home)
+            roles = (directory / 'praise.json').read_bytes()
+            yaml = directory / 'config.yml'
+            yaml.write_text('theme: custom\ntask:\n  concurrency: 3\n  agentModelOverrides:\n    unrelated: vendor/custom\n')
+            original = yaml.read_bytes()
+            result = installation.install(home)
+            self.assertEqual(result['installed'], 0)
+            self.assertEqual((directory / 'praise.json').read_bytes(), roles)
+            self.assertEqual(yaml.read_bytes(), original)
+            self.assertEqual(config.dispatch('finder', home)['model'], 'custom/new-model:xhigh')
+
+    def test_first_install_preserves_existing_role_model_overrides(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            directory = home / ".omp/agent"
+            directory.mkdir(parents=True)
+            (directory / "config.yml").write_text(
+                "theme:\n  finder: blue\ntask:\n  agentModelOverrides:\n"
+                "    finder: custom/selected-model:high\n"
+                "    security-reviewer: custom/review-model\n"
+                "    custom-worker: vendor/unrelated\n"
+            )
+            installation.install(home, overwrite=True)
+            self.assertEqual(config.dispatch("finder", home)["model"], "custom/selected-model:high")
+            self.assertEqual(config.dispatch("reviewer", home)["model"], "custom/review-model")
+            self.assertEqual(
+                (directory / "config.yml").read_text(),
+                "theme:\n  finder: blue\ntask:\n  agentModelOverrides:\n    custom-worker: vendor/unrelated\n",
+            )
+
+    def test_conflicts_are_backed_up_and_tombstones_are_reversible(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            directory = config.agent_dir(home)
+            directory.mkdir(parents=True)
+            legacy = directory / 'crew.json'
+            legacy.write_text(json.dumps({'lead_model': 'vendor/lead:xhigh', 'roles': {'finder': {'models': ['vendor/finder:high']}}}))
+            original = legacy.read_bytes()
+            obsolete = directory / 'extensions/crew-router.js'
+            obsolete.parent.mkdir()
+            obsolete.write_bytes(b'old-router')
+            unrelated = directory / 'agents/custom-worker.md'
+            unrelated.parent.mkdir()
+            unrelated.write_bytes(b'user-owned')
+            with self.assertRaises(PraiseError):
+                installation.install(home)
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertFalse((directory / 'praise.json').exists())
+            result = installation.install(home, overwrite=True)
+            self.assertFalse(legacy.exists())
+            self.assertFalse(obsolete.exists())
+            self.assertEqual(config.dispatch('lead', home)['model'], 'vendor/lead:xhigh')
+            self.assertEqual(config.dispatch('finder', home)['model'], 'vendor/finder:high')
+            records = json.loads((Path(result['backup']) / 'manifest.json').read_text())
+            self.assertTrue(any(record['path'] == 'crew.json' and record['installed_sha256'] is None for record in records))
+            installation.rollback(home, Path(result['backup']))
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertEqual(obsolete.read_bytes(), b'old-router')
+            self.assertEqual(unrelated.read_bytes(), b'user-owned')
+            self.assertFalse((directory / 'praise.json').exists())
+
+    def test_recreated_tombstone_blocks_entire_rollback(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            directory = config.agent_dir(home)
+            directory.mkdir(parents=True)
+            (directory / 'crew.json').write_text('{}')
+            result = installation.install(home, overwrite=True)
+            (directory / 'crew.json').write_bytes(b'new-user-work')
+            with self.assertRaises(PraiseError):
+                installation.rollback(home, Path(result['backup']))
+            self.assertEqual((directory / 'crew.json').read_bytes(), b'new-user-work')
+            self.assertTrue((directory / 'extensions/praise-router.js').exists())
+
+    def test_failed_install_rolls_back_writes_and_removals(self):
         with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp).resolve()
-            backup = home / '.local/state/praise/install-backups/test'
-            backup.mkdir(parents=True)
-            original, installed = b'original\n', b'installed\n'
-            atomic_write(home / 'existing', installed, 0o600)
-            atomic_write(home / 'new', installed, 0o600)
-            atomic_write(backup / 'existing', original, 0o640)
-            records = [
-                {'path': 'existing', 'original_sha256': digest(original), 'original_mode': 0o640, 'installed_sha256': digest(installed)},
-                {'path': 'new', 'original_sha256': None, 'original_mode': None, 'installed_sha256': digest(installed)},
-            ]
-            (backup / 'manifest.json').write_text(json.dumps(records))
-            result = rollback(home, backup)
-            self.assertEqual(result['restored'], 2)
-            self.assertEqual((home / 'existing').read_bytes(), original)
-            self.assertEqual((home / 'existing').stat().st_mode & 0o777, 0o640)
-            self.assertFalse((home / 'new').exists())
+            home = Path(temp)
+            directory = config.agent_dir(home)
+            directory.mkdir(parents=True)
+            old = directory / 'crew.json'
+            old.write_bytes(b'old-catalog')
+            new = directory / 'new-owned'
+            entries = [(old, None, 0), (new, b'new-content', 0o600)]
+            real_write = installation.atomic_write
+            def fail_new(target, data, mode):
+                if target == new:
+                    raise OSError('injected installation failure')
+                return real_write(target, data, mode)
+            with patch('praise.installation.atomic_write', side_effect=fail_new), self.assertRaises(OSError):
+                installation._apply(home, directory, entries, overwrite=True, dry_run=False)
+            self.assertEqual(old.read_bytes(), b'old-catalog')
+            self.assertFalse(new.exists())
 
-    def test_changed_destination_blocks_entire_rollback(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp).resolve()
-            backup = home / '.local/state/praise/install-backups/test'
-            backup.mkdir(parents=True)
-            atomic_write(home / 'existing', b'new-user-work', 0o600)
-            atomic_write(backup / 'existing', b'original', 0o600)
-            (backup / 'manifest.json').write_text(json.dumps([{'path': 'existing', 'original_sha256': digest(b'original'), 'original_mode': 0o600, 'installed_sha256': digest(b'installed')}]))
-            with self.assertRaises(ValueError):
-                rollback(home, backup)
-            self.assertEqual((home / 'existing').read_bytes(), b'new-user-work')
+    def test_unsafe_yaml_refused_before_any_owned_file_changes(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            directory = config.agent_dir(home)
+            directory.mkdir(parents=True)
+            yaml = directory / 'config.yml'
+            yaml.write_text('task: &defaults {agentModelOverrides: {finder: vendor/old}}\n')
+            original = yaml.read_bytes()
+            with self.assertRaises(PraiseError):
+                installation.install(home, overwrite=True)
+            self.assertEqual(yaml.read_bytes(), original)
+            self.assertEqual({entry.name for entry in directory.iterdir()}, {'config.yml'})
 
-    def test_destination_symlink_escape_is_refused(self):
+    def test_profile_uses_same_agent_root_as_dispatch(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as profile, packaged_resources():
+            home = Path(temp)
+            with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': profile}), patch('praise.installation.Path.home', return_value=home):
+                installation.install()
+                config.set_role_model('lead', 'vendor/profile:high')
+                self.assertTrue((Path(profile) / 'extensions/praise-router.js').is_file())
+                self.assertEqual(config.dispatch('lead')['model'], 'vendor/profile:high')
+                self.assertFalse((home / '.omp/agent/praise.json').exists())
+
+    def test_rollback_refuses_another_profile_before_restoring_any_files(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as profile, packaged_resources():
+            home = Path(temp)
+            result = installation.install(home)
+            original = (config.agent_dir(home) / 'praise.json').read_bytes()
+            with self.assertRaises(PraiseError):
+                installation.rollback(home, Path(result['backup']), directory=Path(profile))
+            self.assertEqual((config.agent_dir(home) / 'praise.json').read_bytes(), original)
+            self.assertTrue((home / '.local/bin/praise').exists())
+
+    def test_symlink_and_parent_escape_are_refused(self):
         with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
-            home = Path(temp).resolve()
+            home = Path(temp)
             (home / 'linked').symlink_to(outside, target_is_directory=True)
-            with self.assertRaises(ValueError):
-                safe(home, 'linked/owned')
-            with self.assertRaises(ValueError):
-                safe(home, '../outside')
+            with self.assertRaises(PraiseError):
+                installation.safe(home, 'linked/owned')
+            with self.assertRaises(PraiseError):
+                installation.safe(home, '../outside')
 
 
 if __name__ == '__main__':

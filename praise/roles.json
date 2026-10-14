@@ -1,22 +1,14 @@
 {
-  "schema_version": 2,
-  "lead_model": "opencode-go/cat-jam-free:xhigh",
-  "lead_recovery_model": "opencode-go/cat-jam-free:xhigh",
-  "stages": {
-    "plan": "planner", "recon": "scout", "discover": "finder",
-    "gate": "verifier", "proof": "exploiter", "verdict": "skeptic",
-    "review": "reviewer", "patch": "tester"
-  },
-  "escalations": {},
-  "experts": {},
-  "roles": {
-    "planner": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "scout": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "finder": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
-    "verifier": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
-    "exploiter": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
-    "skeptic": {"models": ["opencode-go/glm-5.3-flash:high"], "independent": true},
-    "reviewer": {"models": ["openai-codex/gpt-daybreak-blue-latest:high"], "independent": true},
-    "tester": {"models": ["opencode-go/longcat-2.5-preview-free:high"], "independent": true}
+  "schema_version": 3,
+  "models": {
+    "lead": "opencode-go/cat-jam-free:xhigh",
+    "planner": "opencode-go/longcat-2.5-preview-free:high",
+    "scout": "opencode-go/longcat-2.5-preview-free:high",
+    "finder": "opencode-go/deepseek-v4.1-flash:high",
+    "verifier": "opencode-go/longcat-2.5-preview-free:high",
+    "exploiter": "opencode-go/deepseek-v4.1-flash:high",
+    "skeptic": "opencode-go/glm-5.3-flash:high",
+    "reviewer": "openai-codex/gpt-daybreak-blue-latest:high",
+    "tester": "opencode-go/longcat-2.5-preview-free:high"
   }
 }

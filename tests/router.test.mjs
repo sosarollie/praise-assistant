@@ -1,1180 +1,358 @@
 import { test } from "node:test";
-import assert from "node:assert";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { execFile, spawn as spawnProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import http from "node:http";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { createPraiseRouter, parseTaskHeader, observedModel } from "../praise/integration/extensions/praise-router.js";
+import { acquireJsonClient } from "../praise/integration/extensions/json-client.mjs";
 
-import {
-  parseTaskHeader,
-  validateHeader,
-  buildDispatchArgs,
-  loadCatalog,
-  createCrewRouter,
-} from "../home/.omp/agent/extensions/crew-router.js";
-import { acquireJsonClient } from "../home/.omp/agent/extensions/json-client.mjs";
+const repository = fileURLToPath(new URL("../", import.meta.url));
+const run = promisify(execFile);
+const models = { lead: "fixture/lead:high", finder: "fixture/finder:high", verifier: "fixture/verifier:high", scout: "fixture/scout:high" };
+let serial = 0;
 
-const STAGES = new Set(["plan", "recon", "discover", "gate", "proof", "verdict", "review", "patch"]);
-
-function header(overrides = {}) {
-  return `PraiseAssistant-Task: ${JSON.stringify({
-    stage: "proof",
-    candidate_id: "C-1",
-    engagement_dir: "/tmp/eng",
-    escalated: false,
-    ...overrides,
-  })}`;
-}
-
-function makeZod() {
-  const optional = { optional: () => optional, passthrough: () => optional };
-  return {
-    string: () => optional,
-    number: () => optional,
-    boolean: () => optional,
-    array: () => optional,
-    object: () => optional,
-  };
-}
-
-function makePi() {
-  const tools = [];
-  const handlers = {};
-  const entries = [];
-  const messages = [];
-  const listeners = new Set();
-  return {
-    zod: makeZod(),
-    tools,
-    handlers,
-    entries, messages, listeners,
+function piFixture(entries = []) {
+  const handlers = new Map(), tools = new Map(), deliveries = [], listeners = new Set();
+  const schema = { optional() { return this; } };
+  const zod = Object.fromEntries(["object", "string", "number", "enum", "array", "record", "unknown"].map((name) => [name, () => schema]));
+  return { handlers, tools, entries, deliveries, listeners, zod, logger: { warn() {} },
+    on(name, fn) { handlers.set(name, fn); }, registerTool(tool) { tools.set(tool.name, tool); },
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
     sendMessage(message, options) {
-      if (this.deliveryError) throw new Error("delivery unavailable");
-      messages.push({ message, options });
-      if (!this.deliveryDeferred) entries.push({ type: "custom_message", ...message });
+      if (this.deliveryFailure) throw new Error("delivery failed");
+      deliveries.push({ message, options });
+      if (!this.deferDelivery) entries.push({ type: "custom_message", ...message });
       for (const listener of listeners) listener(message);
     },
-    logger: { info() {} },
-    registerTool(def) {
-      tools.push(def);
-    },
-    on(event, handler) {
-      (handlers[event] ||= []).push(handler);
-    },
   };
 }
 
-// Explicit injected request runner for focused routing fixtures.
-function makeExec(handler) {
-  const fn = async (command, directory) => {
-    const args = ["--engagement", directory, ...command];
-    if (command[0] === "scope") return { mode: "source" };
-    const result = handler(args, fn.calls.length);
-    fn.calls.push(args);
-    if (result?.reject) throw new Error(result.reject.stderr || result.reject.message || "cli failed");
-    return JSON.parse(result?.stdout || "{}");
-  };
-  fn.calls = [];
-  return fn;
+function context(pi, directory, { role = "lead", model = models[role], parent, session, id } = {}) {
+  const n = ++serial;
+  return { cwd: directory, model: { provider: model.split("/")[0], id: model.split("/")[1].replace(/:high$/, "") },
+    agent: { kind: role === "lead" ? "main" : "sub", name: role, id: id || `Host${n}`, ...(parent ? { parentId: parent } : {}) },
+    sessionManager: { getSessionId: () => session || `session-${n}`, getEntries: () => pi.entries } };
 }
 
-const emptyFs = {
-  readFileSync: () => {
-    throw new Error("no file");
-  },
-  writeFileSync: () => {},
-  mkdtempSync: (p) => p,
-  rmSync: () => {},
-};
-
-// Real CLI fixtures exercise the frontend/backend contract without model calls.
-async function localFixture(t, url) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "praiseassistant-router-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const directory = path.join(root, "eng");
-  const source = path.join(root, "source");
-  fs.mkdirSync(source);
-  const repository = fileURLToPath(new URL("../", import.meta.url));
-  const spawn = promisify(execFile);
-  const exec = (_file, args, options = {}) => spawn("python3", ["-m", "praiseassistant", ...args], { ...options, cwd: repository });
-  const init = ["init", "--directory", directory, "--program", "local fixture", "--basis", "isolated regression controls", "--asset", source];
-  if (url) init.push("--mode", "audit", "--asset", url, "--max-requests", "3", "--interval", "0");
-  await exec("", init);
-  fs.writeFileSync(path.join(directory, "evidence", "trace.json"), '{"fixture":"controlled evidence"}');
-  const pi = makePi();
-  const catalog = JSON.parse(fs.readFileSync(new URL("../praiseassistant/roles.json", import.meta.url), "utf8"));
-  const processes = [];
-  const clientOptions = { command: "python3", prefix: ["-m", "praiseassistant"], cwd: repository,
-    spawn(command, args, options) { const child = spawnProcess(command, args, options); processes.push(child); return child; },
-  };
-  createCrewRouter(pi, { clientOptions, catalog });
-  t.after(() => pi.handlers.session_shutdown[0]());
-  const ctx = contextFor(pi, directory);
-  const startup = await pi.handlers.before_agent_start[0]({ prompt: "local regression" }, ctx);
-  const tool = (name) => pi.tools.find((entry) => entry.name === name);
-  const invoke = (name, params, context = ctx) => tool(name).execute("fixture", params, undefined, undefined, context);
-  const create = async (context = ctx) => {
-    const result = await invoke("praiseassistant_transition", {
-      action: "candidate",
-      finding: { evidence: ["trace.json"], boundary_invariant: "synthetic tenant isolation" },
-    }, context);
-    assert.equal(result.details.ok, true);
-    return result.details.data;
-  };
-  return { root, directory, pi, ctx, invoke, create, repository, catalog, startup, processes, clientOptions };
-}
-const tmpdir = () => "/tmp";
-
-let sessionNumber = 0;
-function contextFor(pi, directory, identity = {}) {
-  const number = ++sessionNumber;
-  return {
-    cwd: directory, model: { provider: "opencode-go", id: "glm-5.3-flash" },
-    agent: { kind: "main", id: `Fixture${number}`, name: "main", ...identity },
-    sessionManager: { getSessionId: () => `session-${number}`, getEntries: () => pi.entries },
-  };
-}
-
-function toolInvoker(pi, ctx) {
-  return (name, params) => pi.tools.find((entry) => entry.name === name).execute("fixture", params, undefined, undefined, ctx);
-}
-
-function nextMessages(pi, count) {
-  return new Promise((resolve) => {
-    const received = [];
-    const listener = (message) => {
-      if (message.customType !== "praiseassistant-message") return;
-      received.push(JSON.parse(message.content));
-      if (received.length === count) { pi.listeners.delete(listener); resolve(received); }
+function notification(pi, predicate) {
+  const existing = pi.deliveries.map((d) => d.message).find((m) => m.customType === "praise-message" && predicate(JSON.parse(m.content)));
+  if (existing) return Promise.resolve(JSON.parse(existing.content));
+  return new Promise((resolve, reject) => {
+    const listener = (m) => {
+      if (m.customType !== "praise-message") return;
+      const data = JSON.parse(m.content);
+      if (!predicate(data)) return;
+      clearTimeout(timer); pi.listeners.delete(listener); resolve(data);
     };
+    const timer = setTimeout(() => { pi.listeners.delete(listener); reject(new Error("bounded notification deadline exceeded")); }, 3000);
     pi.listeners.add(listener);
   });
 }
 
-// ---------------------------------------------------------------------------
-// Header parsing and fixed-field validation.
-// ---------------------------------------------------------------------------
-
-test("parses an exact first-line header", () => {
-  const r = parseTaskHeader(header(), STAGES);
-  assert.equal(r.kind, "ok");
-  assert.equal(r.header.stage, "proof");
-  assert.equal(r.header.candidate_id, "C-1");
-  assert.equal(r.header.engagement_dir, "/tmp/eng");
-});
-
-test("negated body wording does not change the explicit stage", () => {
-  const text = `${header({ stage: "verdict" })}\nDo NOT issue a verdict. This is routine, no adversarial review, not a deep analysis.`;
-  const r = parseTaskHeader(text, STAGES);
-  assert.equal(r.kind, "ok");
-  assert.equal(r.header.stage, "verdict");
-});
-
-test("a header on a later line is not recognized (exact first line only)", () => {
-  const r = parseTaskHeader(`some prose\n${header()}`, STAGES);
-  assert.equal(r.kind, "none");
-});
-
-test("unknown stage fails closed", () => {
-  const r = parseTaskHeader(header({ stage: "explode" }), STAGES);
-  assert.equal(r.kind, "invalid");
-  assert.match(r.reason, /unknown stage/);
-});
-
-test("missing engagement_dir fails closed", () => {
-  const r = parseTaskHeader(
-    `PraiseAssistant-Task: ${JSON.stringify({ stage: "proof" })}`,
-    STAGES,
-  );
-  assert.equal(r.kind, "invalid");
-  assert.match(r.reason, /engagement_dir/);
-});
-
-test("non-absolute engagement_dir fails closed", () => {
-  const r = parseTaskHeader(header({ engagement_dir: "relative/path" }), STAGES);
-  assert.equal(r.kind, "invalid");
-  assert.match(r.reason, /absolute/);
-});
-
-test("malformed JSON fails closed", () => {
-  const r = parseTaskHeader(`PraiseAssistant-Task: {not json`, STAGES);
-  assert.equal(r.kind, "invalid");
-  assert.match(r.reason, /not valid/);
-});
-
-
-// ---------------------------------------------------------------------------
-// Routing and dispatch through a mocked pi host.
-// ---------------------------------------------------------------------------
-
-const CATALOG = {
-  stages: {
-    plan: "pentest-planner",
-    recon: "pentest-scout",
-    discover: "pentest-finder",
-    gate: "pentest-verifier",
-    proof: "pentest-exploiter",
-    verdict: "pentest-skeptic",
-    patch: "pentest-tester",
-    review: "security-reviewer",
-  },
-  escalations: { discover: "pentest-finder-deep", proof: "pentest-exploiter-deep", verdict: "pentest-skeptic-deep" },
-  experts: { discover: "pentest-finder-expert", proof: "pentest-exploiter-expert" },
-  roles: {
-    "pentest-exploiter": { models: ["opencode-go/deepseek-v4.1-flash:high"] },
-    "pentest-exploiter-deep": { models: ["opencode-go/deepseek-v4.1-flash:high"] },
-    "pentest-exploiter-expert": { models: ["opencode-go/deepseek-v4-pro:high"], max_model: "opencode-go/deepseek-v4-pro:max" },
-    "security-reviewer": { models: ["openai-codex/gpt-daybreak-blue-latest:high"], independent: true },
-    "pentest-skeptic": { models: ["opencode-go/deepseek-v4.1-flash:high"], independent: true },
-  },
-};
-
-function routedPi(exec) {
-  const pi = makePi();
-  const deps = { requestRunner: exec, ...emptyFs, tmpdir, catalog: CATALOG, cliCmd: "praiseassistant" };
-  createCrewRouter(pi, deps);
-  const toolCall = pi.handlers.tool_call[0];
-  pi.handlers.tool_call[0] = (event, ctx = contextFor(pi, "/tmp/eng")) => toolCall(event, ctx);
-  return pi;
-}
-
-function dispatchExec(map) {
-  return makeExec((args) => {
-    const stage = args[args.indexOf("--stage") + 1];
-    const out = map[stage];
-    if (!out) return { reject: { stderr: `{"error":"no agent for ${stage}"}`, code: 2 } };
-    return { stdout: JSON.stringify(out) };
-  });
-}
-
-test("routes a batch of plural proof/verdict tasks from headers, not wording", async () => {
-  const exec = dispatchExec({
-    proof: { stage: "proof", agent: "pentest-exploiter", model: "opencode-go/deepseek-v4.1-flash:high" },
-    verdict: { stage: "verdict", agent: "pentest-skeptic", model: "opencode-go/deepseek-v4.1-flash:high" },
-  });
-  const pi = routedPi(exec);
-  const handler = pi.handlers.tool_call[0];
-
-  const input = {
-    tasks: [
-      { name: "a", task: `${header({ stage: "proof" })}\nDo NOT write any proof of concept.` },
-      { name: "b", task: `${header({ stage: "verdict" })}\nThis is routine, do not escalate.` },
-    ],
+async function fixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "praise-router-"));
+  const directory = path.join(root, "eng"), home = path.join(root, "home");
+  const env = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"), PYTHONPATH: repository };
+  const python = async (code, ...args) => JSON.parse((await run("python3", ["-c", code, ...args], { cwd: repository, env })).stdout);
+  await python("import json,sys; from praise.runtime import init_engagement; print(json.dumps(init_engagement(sys.argv[1],program='local fixture',basis='owned offline regression',assets=[sys.argv[2]],mode='source')))", directory, root);
+  for (const [role, model] of Object.entries(models)) {
+    await run("python3", ["-m", "praise", "setAgent", "--role", role, "--model", model], { cwd: repository, env });
+  }
+  const processes = [], sessions = [];
+  const options = { command: "python3", prefix: ["-m", "praise"], cwd: repository, env,
+    spawn(command, args, settings) { const child = spawn(command, args, settings); processes.push(child); return child; } };
+  const open = (settings = {}) => {
+    const pi = piFixture(settings.entries || []);
+    createPraiseRouter(pi, { clientOptions: options });
+    const ctx = context(pi, settings.directory || directory, settings);
+    sessions.push(pi);
+    const start = (prompt = "offline fixture task") => pi.handlers.get("before_agent_start")({ prompt, systemPrompt: ["host policy"] }, ctx);
+    const invoke = async (name, params) => {
+      const result = await pi.tools.get(name).execute("test-call", params, undefined, undefined, ctx);
+      pi.entries.push({ type: "message", message: { role: "toolResult", toolName: name, content: result.content } });
+      return result;
+    };
+    return { pi, ctx, start, invoke, shutdown: () => pi.handlers.get("session_shutdown")({}, ctx) };
   };
-  const result = await handler({ toolName: "task", input });
+  t.after(async () => { for (const pi of sessions) await pi.handlers.get("session_shutdown")(); fs.rmSync(root, { recursive: true, force: true }); });
+  const lead = open();
+  const startup = await lead.start();
+  const identity = JSON.parse(startup.message.content);
+  return { root, directory, home, env, options, python, open, lead, identity, processes };
+}
 
-  assert.ok(result && result.input && result.input.tasks, "expected a rewritten batch");
-  assert.deepEqual(
-    result.input.tasks.map((t) => t.agent),
-    ["pentest-exploiter", "pentest-skeptic"],
-  );
-  assert.deepEqual(
-    result.input.tasks.map((t) => t.model),
-    ["opencode-go/deepseek-v4.1-flash:high", "opencode-go/deepseek-v4.1-flash:high"],
-  );
+async function routedChild(f, parent, role, task = "Inspect supplied offline code") {
+  const callId = `task-${++serial}`;
+  const revised = await parent.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: callId,
+    input: { context: "Owned offline source only", tasks: [{ agent: role, name: `Worker${serial}`, task }] } }, parent.ctx);
+  assert.equal(revised.block, undefined);
+  const item = revised.input.tasks[0];
+  const spawnResult = await parent.pi.handlers.get("before_subagent_spawn")({ agent: role, invocationKind: "task", patterns: ["wrong/default"], spawnKey: callId }, parent.ctx);
+  assert.equal(spawnResult.model, models[role]);
+  const child = f.open({ role, parent: parent.ctx.agent.id });
+  const startup = await child.start(item.task);
+  return { ...child, item, identity: JSON.parse(startup.message.content), callId };
+}
+
+test("global installation leaves ordinary unscoped OMP sessions unchanged", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "praise-unscoped-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const pi = piFixture();
+  createPraiseRouter(pi, { clientOptions: { spawn() { throw new Error("unscoped resident must not launch"); } } });
+  const ctx = context(pi, directory);
+  assert.equal(await pi.handlers.get("before_agent_start")({ prompt: "ordinary coding", systemPrompt: ["host policy"] }, ctx), undefined);
+  assert.equal(await pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "ordinary", input: { agent: "task", task: "ordinary work" } }, ctx), undefined);
+  assert.equal(await pi.handlers.get("before_subagent_spawn")({ agent: "task", invocationKind: "task", patterns: ["host/default"] }, ctx), undefined);
+  const blocked = await pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "specialist", input: { agent: "finder", task: "scoped work" } }, ctx);
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /initialized engagement/);
+  await pi.handlers.get("session_shutdown")();
 });
 
-test("a failed dispatch returns block, never a fallback agent", async () => {
-  const exec = makeExec(() => ({ reject: { stderr: '{"error":"candidate not gated"}', code: 2 } }));
-  const pi = routedPi(exec);
-  const handler = pi.handlers.tool_call[0];
-
-  const result = await handler({ toolName: "task", input: { task: header({ stage: "proof" }) } });
-  assert.ok(result && result.block, "expected a block");
-  assert.equal(result.input, undefined);
+test("all canonical specialists expose native delegation and communication tools", () => {
+  const roles = ["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"];
+  for (const role of roles) {
+    const text = fs.readFileSync(new URL(`../praise/integration/agents/${role}.md`, import.meta.url), "utf8");
+    assert.match(text, new RegExp(`name: ${role}\\n`));
+    assert.match(text, /tools: .*task.*praise_message.*praise_state/);
+    assert.match(text, /authorization/);
+    assert.doesNotMatch(text, /self.learning|PraiseAssistant-Task|candidate_id/);
+  }
 });
 
-test("non-crew keyword wording without a header is left untouched", async () => {
-  const pi = routedPi(makeExec(() => ({ stdout: "{}" })));
-  const handler = pi.handlers.tool_call[0];
-
-  const result = await handler({
-    toolName: "task",
-    input: { task: "issue a verdict on this candidate, false positive or duplicate" },
-  });
-  assert.equal(result, undefined, "no header means no routing");
+test("registration and context use official host identity and only communication tools", async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.identity.role, "lead");
+  assert.equal(f.identity.model, "fixture/lead");
+  assert.equal(f.identity.model_source, "host");
+  assert.deepEqual([...f.lead.pi.tools.keys()], ["praise_message", "praise_state"]);
+  const context = await f.lead.start();
+  assert.equal(context.systemPrompt[0], "host policy");
+  assert.match(context.systemPrompt[1], /untrusted data/);
+  assert.equal(f.processes.length, 1);
+  assert.equal(observedModel({}), null);
 });
 
-test("a header-less task inside an active scope is left untouched", async () => {
-  const exec = dispatchExec({
-    proof: { stage: "proof", agent: "pentest-exploiter", model: "opencode-go/deepseek-v4.1-flash:high" },
-  });
-  const pi = routedPi(exec);
-  const handler = pi.handlers.tool_call[0];
-
-  await handler({ toolName: "task", input: { task: header({ stage: "proof" }) } });
-  const result = await handler({ toolName: "task", input: { task: "do some generic thing" } });
-  assert.equal(result, undefined, "no header means no routing, not a block");
+test("configured task routing needs no user header and pushes startup plus owned replies", async (t) => {
+  const f = await fixture(t);
+  const child = await routedChild(f, f.lead, "finder");
+  const header = parseTaskHeader(child.item.task);
+  assert.deepEqual(header, { role: "finder", engagement_dir: f.directory, parent: f.identity.agent });
+  assert.equal(child.identity.parent, f.identity.agent);
+  assert.equal(child.identity.model, "fixture/finder");
+  await notification(f.lead.pi, (m) => m.data.event === "agent.started" && m.from === child.identity.agent);
+  const pushed = notification(child.pi, (m) => m.kind === "ask");
+  const ask = await f.lead.invoke("praise_message", { action: "send", to: child.identity.agent, kind: "ask", data: { need: "source reference" } });
+  assert.equal(ask.details.ok, true);
+  const message = await pushed;
+  const reply = notification(f.lead.pi, (m) => m.kind === "reply");
+  const answer = await child.invoke("praise_message", { action: "send", to: f.identity.agent, kind: "reply", reply_to: message.seq,
+    data: { source: "owned/code.js:8" } });
+  assert.equal(answer.details.ok, true);
+  const delivered = await reply;
+  assert.equal(delivered.from, child.identity.agent);
+  const roster = await f.lead.invoke("praise_message", { action: "peers" });
+  assert.equal(roster.details.data.agents.find((a) => a.id === delivered.from).model, "fixture/finder");
+  assert.equal(f.lead.pi.deliveries.at(-1).options.deliverAs, "aside");
+  assert.equal(f.processes.length, 1);
 });
 
-test("escalation requires the flag and an unresolved reason, never suggestive wording", async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create({
-    ...fixture.ctx, model: { provider: "opencode-go", id: "deepseek-v4-pro" },
-  });
-  await fixture.invoke("praiseassistant_transition", {
-    action: "gate", candidate_id: candidate.id, decision: "pass", reason: "source fixture trace",
-  });
-  const handler = fixture.pi.handlers.tool_call[0];
-  const route = (metadata, body = "") => handler({
-    toolName: "task",
-    input: { task: header({ stage: "proof", candidate_id: candidate.id, engagement_dir: fixture.directory, ...metadata }) + body },
-  }, fixture.ctx);
-  const ordinary = await route({ escalated: false }, "\nDeep escalation is not needed.");
-  assert.equal(ordinary.input.agent, "pentest-exploiter");
-  const workerPi = makePi();
-  const worker = await anotherFactory(t, fixture, {
-    pi: workerPi,
-    ctx: { ...contextFor(workerPi, fixture.directory, { kind: "sub", name: "pentest-exploiter" }),
-      model: { provider: "opencode-go", id: "deepseek-v4.1-flash" } },
-    prompt: header({ stage: "proof", candidate_id: candidate.id, engagement_dir: fixture.directory }),
-  });
-  const close = await worker.invoke("praiseassistant_message", {
-    action: "send", to: "@lead", kind: "close", candidate_id: candidate.id,
-    data: { status: "unresolved", finding_id: candidate.id, hypothesis: "synthetic control",
-      evidence: ["trace.json"], contradictions: [], unresolved_questions: ["cross-request chain gap"],
-      recommended_next_agent: null, worker: "spoofed", tier: "expert-max" },
-    evidence: ["trace.json"],
-  });
-  assert.equal(close.details.ok, true, close.content[0].text);
-  const packet = await fixture.invoke("praiseassistant_message", { action: "packet", data: minimalPacket(candidate.id) });
-  assert.equal(packet.details.ok, true, packet.content[0].text);
-  const deep = await route({ escalated: true, reason: "cross-request chain remains unresolved",
-    packet: packet.details.data.ref, attempt: close.details.data.seq });
-  assert.equal(deep.input.agent, "pentest-exploiter-deep");
-  assert.equal(deep.input.model, "opencode-go/deepseek-v4.1-flash:high");
-  const missingReason = await route({ escalated: true });
-  assert.equal(missingReason.block, true);
+test("nested finder to verifier retains immediate parent lineage and exact model", async (t) => {
+  const f = await fixture(t);
+  const finder = await routedChild(f, f.lead, "finder");
+  const verifier = await routedChild(f, finder, "verifier", "Check supplied source reachability");
+  assert.equal(verifier.identity.parent, finder.identity.agent);
+  assert.equal(verifier.identity.model, "fixture/verifier");
+  const started = await notification(finder.pi, (m) => m.data.event === "agent.started" && m.from === verifier.identity.agent);
+  assert.equal(started.to, finder.identity.agent);
+  assert.equal(f.processes.length, 1);
 });
 
-// ---------------------------------------------------------------------------
-// Per-session state isolation and the spawn re-check.
-// ---------------------------------------------------------------------------
-
-test("active scope is isolated per factory invocation (session)", async () => {
-  const execA = dispatchExec({ proof: { stage: "proof", agent: "pentest-exploiter", model: "opencode-go/deepseek-v4.1-flash:high" } });
-  const piA = routedPi(execA);
-  const piB = routedPi(makeExec(() => ({ stdout: "{}" })));
-
-  await piA.handlers.tool_call[0]({ toolName: "task", input: { task: header({ stage: "proof" }) } });
-
-  // Scope is per factory closure: neither session restricts the tool surface.
-  const freeA = await piA.handlers.tool_call[0]({ toolName: "bash", input: { command: "id" } });
-  assert.equal(freeA, undefined, "session A must not guard bash");
-  const freeB = await piB.handlers.tool_call[0]({ toolName: "bash", input: { command: "id" } });
-  assert.equal(freeB, undefined, "session B must remain unguarded");
+test("a mismatched observed child identity blocks registration without fallback", async (t) => {
+  const f = await fixture(t);
+  const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "mismatch",
+    input: { agent: "finder", task: "offline source question" } }, f.lead.ctx);
+  await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: ["wrong/other"] }, f.lead.ctx);
+  const child = f.open({ role: "finder", model: "wrong/model:high", parent: f.lead.ctx.agent.id });
+  await assert.rejects(child.start(revised.input.task), /observed worker model differs/);
+  const peers = await f.lead.invoke("praise_message", { action: "peers" });
+  assert.equal(JSON.stringify(peers.details.data).includes("wrong/model"), false);
 });
 
-test("before_subagent_spawn respects the dispatch model and blocks undispatch crew spawns", async () => {
-  const exec = dispatchExec({ proof: { stage: "proof", agent: "pentest-exploiter", model: "opencode-go/deepseek-v4.1-flash:high" } });
-  const pi = routedPi(exec);
-  const toolCall = pi.handlers.tool_call[0];
-  const spawn = pi.handlers.before_subagent_spawn[0];
-
-  await toolCall({ toolName: "task", input: { task: header({ stage: "proof" }) } });
-
-  const allowed = await spawn({ agent: "pentest-exploiter", invocationKind: "task", patterns: [] });
-  assert.equal(allowed.model, "opencode-go/deepseek-v4.1-flash:high");
-
-  const blocked = await spawn({ agent: "pentest-skeptic", invocationKind: "task", patterns: [] });
-  assert.ok(blocked && blocked.block);
-  assert.match(blocked.reason, /without a PraiseAssistant-Task dispatch record/);
-});
-
-// ---------------------------------------------------------------------------
-// Tool write guards (observed model required).
-// ---------------------------------------------------------------------------
-
-test("JSON messages refuse a write without an observed model", async () => {
-  const exec = makeExec(() => ({ stdout: "{}" }));
-  const pi = routedPi(exec);
-  const tool = pi.tools.find((t) => t.name === "praiseassistant_message");
-  const result = await tool.execute("id", { action: "send", to: "@lead", kind: "ask", data: { x: 1 }, engagement_dir: "/tmp/eng" }, undefined, undefined, {});
+test("host model substitution after startup cannot send a message or call a provider", async (t) => {
+  const f = await fixture(t);
+  const child = await routedChild(f, f.lead, "finder");
+  child.ctx.model = { provider: "fixture", id: "alternate" };
+  assert.throws(() => child.pi.handlers.get("before_provider_request")({}, child.ctx), /model substitution/);
+  const result = await child.invoke("praise_message", { action: "send", to: f.identity.agent, kind: "reply", data: { answer: "not authorized" } });
   assert.equal(result.details.ok, false);
-  assert.match(result.content[0].text, /no observed model/);
-  assert.equal(exec.calls.length, 0, "must not call the CLI without a model");
+  assert.match(result.details.error, /host identity changed/);
 });
 
-
-test("praiseassistant_request rejects an unknown method", async () => {
-  const exec = makeExec(() => ({ stdout: "{}" }));
-  const pi = routedPi(exec);
-  const tool = pi.tools.find((t) => t.name === "praiseassistant_request");
-  const result = await tool.execute(
-    "id",
-    { url: "https://x", method: "TRACE", role: "scout", engagement_dir: "/tmp/eng" },
-    undefined,
-    undefined,
-    { model: { provider: "opencode-go", id: "deepseek-v4-pro" } },
-  );
-  assert.equal(result.details.ok, false);
-  assert.match(result.content[0].text, /unknown method/);
+test("batch failure never partially authorizes a valid first item", async (t) => {
+  const f = await fixture(t);
+  const response = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "bad-batch",
+    input: { context: "offline", tasks: [{ agent: "finder", task: "valid source task" }, { agent: "obsolete-proof", task: "invalid role" }] } }, f.lead.ctx);
+  assert.equal(response.block, true);
+  const spawnResult = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
+  assert.equal(spawnResult.block, true);
+  const forged = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
+  await assert.rejects(forged.start(`Praise-Task: ${JSON.stringify({ role: "finder", engagement_dir: f.directory, parent: f.identity.agent })}\nvalid source task`), /host-authorized/);
 });
 
-test("tool producer identity cannot be replaced by caller metadata", async (t) => {
-  const fixture = await localFixture(t);
-  const created = await fixture.invoke("praiseassistant_transition", {
-    action: "candidate",
-    finding: {
-      evidence: ["trace.json"], boundary_invariant: "synthetic control",
-      producer_model: "opencode-go/deepseek-v4-pro",
-    },
-  });
-  assert.equal(created.details.ok, true);
-  const candidate_id = created.details.data.id;
-  const selfReview = await fixture.invoke("praiseassistant_transition", {
-    action: "verdict", candidate_id, decision: "rejected", reason: "fixture, not a finding",
-  });
-  assert.equal(selfReview.details.ok, false);
-  const independent = await fixture.invoke("praiseassistant_transition", {
-    action: "verdict", candidate_id, decision: "rejected", reason: "fixture, not a finding",
-  }, { ...fixture.ctx, model: { provider: "opencode-go", id: "mimo-v2.6-flash" } });
-  assert.equal(independent.details.data.status, "rejected");
-});
-
-test("typed patch gates reach the real CLI and cannot bypass a failed safety gate", async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create({
-    ...fixture.ctx, model: { provider: "opencode-go", id: "deepseek-v4-pro" },
-  });
-  const gates = Object.fromEntries(
-    ["root_cause", "instance_coverage", "no_new_vulnerabilities", "security_best_practices"]
-      .map((name) => [name, { status: "pass", evidence: ["trace.json"] }]),
-  );
-  const fixed = await fixture.invoke("praiseassistant_transition", {
-    action: "validate_fix", candidate_id: candidate.id, validate_fix: gates,
-  });
-  assert.equal(fixed.details.data.result, "fixed");
-  const unsafe = await fixture.invoke("praiseassistant_transition", {
-    action: "validate_fix", candidate_id: candidate.id,
-    validate_fix: { ...gates, no_new_vulnerabilities: { status: "fail", evidence: ["trace.json"] } },
-  });
-  assert.equal(unsafe.details.data.result, "not-fixed");
-});
-
-test("a family conflict cannot select an alternate cheap checker or authorize a partial batch", async (t) => {
-  const fixture = await localFixture(t);
-  const independentSource = await fixture.create();
-  const conflictingSource = await fixture.create({
-    ...fixture.ctx, model: { provider: "opencode-go", id: "deepseek-v4.1-flash" },
-  });
-  const routed = await fixture.pi.handlers.tool_call[0]({
-    toolName: "task",
-    input: { tasks: [independentSource, conflictingSource].map((candidate) => ({
-      task: header({ stage: "verdict", candidate_id: candidate.id, engagement_dir: fixture.directory }),
-    })) },
-  }, fixture.ctx);
-  assert.equal(routed.block, true);
-  assert.equal(routed.input, undefined);
-  const spawn = await fixture.pi.handlers.before_subagent_spawn[0]({
-    agent: "pentest-skeptic", invocationKind: "task", patterns: [],
-  });
-  assert.equal(spawn.block, true);
-});
-
-test("an active session cannot read or dispatch into a sibling engagement", async (t) => {
-  const fixture = await localFixture(t);
-  const sibling = path.join(fixture.root, "sibling");
-  fs.mkdirSync(sibling);
-  const state = await fixture.invoke("praiseassistant_state", { engagement_dir: sibling });
-  assert.equal(state.details.ok, false);
-  assert.match(state.content[0].text, /cross-engagement/);
-  const dispatched = await fixture.pi.handlers.tool_call[0]({
-    toolName: "task", input: { task: header({ stage: "plan", engagement_dir: sibling }) },
-  }, fixture.ctx);
-  assert.equal(dispatched.block, true);
-  assert.match(dispatched.reason, /cross-engagement/);
-});
-
-test("an active engagement does not restrict the tool surface", async (t) => {
-  const fixture = await localFixture(t);
-  const fire = (toolName, input) => fixture.pi.handlers.tool_call[0]({ toolName, input }, fixture.ctx);
-  for (const [toolName, input] of [
-    ["read", { path: "omp://" }],
-    ["read", { path: "/etc/hostname" }],
-    ["read", { path: "https://example.com/x" }],
-    ["grep", { path: "/etc" }],
-    ["glob", { path: "/home/**" }],
-    ["bash", { command: "id" }],
-    ["write", { path: "/tmp/praiseassistant-unrestricted.txt", content: "x" }],
-    ["edit", { path: path.join(fixture.directory, "scope.json"), old_string: "x", new_string: "y" }],
-  ]) {
-    assert.equal(await fire(toolName, input), undefined, `expected ${toolName} ${input.path || input.command} to pass through`);
+test("concurrent same-role native spawns reserve distinct routes", async (t) => {
+  const f = await fixture(t);
+  const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "same-role",
+    input: { context: "offline", tasks: [{ agent: "finder", task: "first scoped question" }, { agent: "finder", task: "second scoped question" }] } }, f.lead.ctx);
+  assert.equal(revised.block, undefined);
+  const dispatches = await Promise.all([0, 1].map((i) => f.lead.pi.handlers.get("before_subagent_spawn")({
+    agent: "finder", invocationKind: "task", patterns: [], spawnKey: `same-role:${i}` }, f.lead.ctx)));
+  assert.deepEqual(dispatches.map((d) => d.model), [models.finder, models.finder]);
+  for (const item of revised.input.tasks) {
+    const child = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
+    await child.start(item.task);
   }
-});
-
-test("header files resolve relative to the session cwd", async (t) => {
-  const hits = [];
-  const server = http.createServer((request, response) => {
-    hits.push(request.url);
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ authorized: request.headers.authorization === "fixture-account-a", witness: "one synthetic record" }));
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const url = `http://127.0.0.1:${server.address().port}/allowed`;
-  const fixture = await localFixture(t, url);
-  const outside = path.join(fixture.root, "outside-headers.json");
-  fs.writeFileSync(outside, '{"Authorization":"outside-control"}');
-  fs.writeFileSync(path.join(fixture.directory, "evidence", "provided.json"), '{"Authorization":"fixture-account-a"}');
-  const allowed = await fixture.invoke("praiseassistant_request", {
-    url, role: "fixture", headers_file: "evidence/provided.json",
-  });
-  assert.equal(allowed.details.data?.response_body?.authorized, true, allowed.content[0].text);
-  assert.equal(allowed.details.data.response_body.witness, "one synthetic record");
-  assert.deepEqual(hits, ["/allowed"]);
-  // An absolute header file outside the engagement is no longer refused.
-  const outsideRun = await fixture.invoke("praiseassistant_request", { url, role: "fixture", headers_file: outside });
-  assert.equal(outsideRun.details.ok, true, outsideRun.content[0].text);
-  assert.equal(outsideRun.details.data.response_body.authorized, false);
-});
-
-async function anotherFactory(t, fixture, { pi = makePi(), ctx, prompt = "local regression", directory = fixture.directory } = {}) {
-  ctx ||= contextFor(pi, directory);
-  createCrewRouter(pi, { clientOptions: fixture.clientOptions, catalog: fixture.catalog });
-  t.after(() => pi.handlers.session_shutdown[0]());
-  const startup = await pi.handlers.before_agent_start[0]({ prompt }, ctx);
-  return { pi, ctx, startup, invoke: toolInvoker(pi, ctx) };
-}
-
-test("two actual factories share one resident service and address JSON replies live", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const other = await anotherFactory(t, fixture);
-  const initial = JSON.parse(fixture.startup.message.content);
-  const second = JSON.parse(other.startup.message.content);
-  assert.equal(fixture.processes.length, 1);
-  assert.notEqual(initial.agent, second.agent);
-  const peers = await fixture.invoke("praiseassistant_message", { action: "peers" });
-  assert.ok(peers.details.data.agents.some((peer) => peer.id === second.agent));
-  const delivered = nextMessages(other.pi, 1);
-  const sent = await fixture.invoke("praiseassistant_message", {
-    action: "send", to: second.agent, kind: "ask", data: { question: "gate?" }, key: "ask-one",
-    from: second.agent, role: "verdict", model: "spoofed/model", engagement: "/other",
-  });
-  assert.equal(sent.details.ok, true, sent.content[0].text);
-  assert.equal("_messages" in sent.details.data, false);
-  const [ask] = await delivered;
-  assert.equal(ask.from, initial.agent);
-  assert.equal(ask.to, second.agent);
-  assert.equal(ask.seq, sent.details.data.seq);
-  assert.deepEqual(ask.data, { question: "gate?" });
-  assert.deepEqual(other.pi.messages[0].options, { deliverAs: "aside" });
-  const replyDelivered = nextMessages(fixture.pi, 1);
-  const replied = await other.invoke("praiseassistant_message", {
-    action: "send", to: ask.from, kind: "reply", reply_to: ask.seq, data: { answer: "held" },
-  });
-  assert.equal(replied.details.ok, true, replied.content[0].text);
-  const [reply] = await replyDelivered;
-  assert.equal(reply.reply, ask.seq);
-  assert.equal(reply.from, second.agent);
-  assert.deepEqual(reply.data, { answer: "held" });
-  const wrongReply = await fixture.invoke("praiseassistant_message", {
-    action: "send", to: second.agent, kind: "reply", reply_to: ask.seq, data: { answer: "forged" },
-  });
-  assert.equal(wrongReply.details.ok, false);
-  const duplicate = await fixture.invoke("praiseassistant_message", {
-    action: "send", to: second.agent, kind: "ask", data: { question: "gate?" }, key: "ask-one",
-  });
-  assert.equal(duplicate.details.data.seq, ask.seq);
-  assert.equal(duplicate.details.data.duplicate, true);
-  const read = await other.invoke("praiseassistant_message", { action: "read" });
-  assert.deepEqual(read.details.data.messages, []);
-  assert.equal(other.pi.messages.length, 1);
-  await fixture.pi.handlers.session_shutdown[0]();
-  const stillResident = await other.invoke("praiseassistant_message", { action: "peers" });
-  assert.equal(stillResident.details.ok, true);
-  assert.equal(fixture.processes.length, 1);
-});
-
-test("separate engagements never deliver private messages or share subprocesses", { timeout: 15_000 }, async (t) => {
-  const first = await localFixture(t);
-  const second = await localFixture(t);
-  const address = JSON.parse(first.startup.message.content).agent;
-  const selfDelivery = nextMessages(first.pi, 1);
-  const sent = await first.invoke("praiseassistant_message", { action: "send", to: address, kind: "close", data: { result: "owned" } });
-  assert.equal(sent.details.ok, true);
-  await selfDelivery;
-  const otherInbox = await second.invoke("praiseassistant_message", { action: "read" });
-  assert.deepEqual(otherInbox.details.data.messages, []);
-  assert.equal(second.pi.messages.length, 0);
-  assert.equal(first.processes.length, 1);
-  assert.equal(second.processes.length, 1);
-  assert.notEqual(first.processes[0].pid, second.processes[0].pid);
-  const cross = await first.invoke("praiseassistant_message", { action: "peers", engagement_dir: second.directory });
-  assert.equal(cross.details.ok, false);
-});
-
-test("offline durable inbox recovery consumes every page without latest-window loss", { timeout: 20_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const recipient = await anotherFactory(t, fixture);
-  const address = JSON.parse(recipient.startup.message.content).agent;
-  await recipient.pi.handlers.session_shutdown[0]();
-  for (let index = 0; index < 40; index++) {
-    const result = await fixture.invoke("praiseassistant_message", { action: "send", to: address, kind: "ask", data: { index } });
-    assert.equal(result.details.ok, true, result.content[0].text);
-  }
-  const pi = makePi();
-  pi.entries.push(...recipient.pi.entries);
-  const recoveredDelivery = nextMessages(pi, 39);
-  const restored = await anotherFactory(t, fixture, { pi, ctx: { ...recipient.ctx, sessionManager: { ...recipient.ctx.sessionManager, getEntries: () => pi.entries } } });
-  const snapshot = JSON.parse(restored.startup.message.content);
-  assert.equal(snapshot.agent, address);
-  const messages = [...snapshot.messages, ...await recoveredDelivery];
-  assert.deepEqual(messages.map((message) => message.data.index), Array.from({ length: 40 }, (_, index) => index));
-  const drained = await restored.invoke("praiseassistant_message", { action: "read" });
-  assert.deepEqual(drained.details.data.messages, []);
-  assert.ok(pi.entries.at(-1).data.cursor >= messages.at(-1).seq);
-});
-
-test("failed push delivery is recovered by the serialized explicit inbox read", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const recipient = await anotherFactory(t, fixture);
-  const address = JSON.parse(recipient.startup.message.content).agent;
-  recipient.pi.deliveryError = true;
-  const sent = await fixture.invoke("praiseassistant_message", { action: "send", to: address, kind: "ask", data: { recovery: true } });
-  assert.equal(sent.details.ok, true);
-  const read = await recipient.invoke("praiseassistant_message", { action: "read" });
-  assert.equal(read.details.ok, true);
-  assert.equal(read.details.data.messages.length, 1);
-  assert.equal(read.details.data.messages[0].seq, sent.details.data.seq);
-  assert.deepEqual((await recipient.invoke("praiseassistant_message", { action: "read" })).details.data.messages, []);
-});
-
-test("startup context is complete bounded JSON and coding outside engagements is untouched", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  assert.equal(fixture.startup.message.attribution, undefined);
-  const content = fixture.startup.message.content;
-  assert.ok(Buffer.byteLength(content) <= 16_000);
-  const startup = JSON.parse(content);
-  assert.match(startup.agent, /^a[0-9a-f]+$/);
-  assert.equal(startup.role, "lead");
-  assert.ok(startup.state && typeof startup.state === "object");
-  assert.ok(Array.isArray(startup.messages));
-  assert.ok(Array.isArray(startup.lessons));
-  const pi = makePi();
-  createCrewRouter(pi, { ...emptyFs, requestRunner: () => { throw new Error("must not call backend"); } });
-  const ctx = contextFor(pi, "/tmp");
-  assert.equal(await pi.handlers.before_agent_start[0]({ prompt: "write local code" }, ctx), undefined);
-  assert.equal(await pi.handlers.tool_call[0]({ toolName: "bash", input: { command: "true" } }, ctx), undefined);
-  assert.equal(await pi.handlers.tool_call[0]({ toolName: "task", input: { task: "ordinary task" } }, ctx), undefined);
-});
-
-test("workflow commit notifications reach an addressed lane and the lead", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const selector = fixture.catalog.roles[fixture.catalog.stages.gate].models[0].replace(/:(low|medium|high|max)$/, "");
-  const [provider, id] = selector.split("/");
-  const gatePi = makePi();
-  const gate = await anotherFactory(t, fixture, {
-    pi: gatePi,
-    ctx: { ...contextFor(gatePi, fixture.directory, { kind: "sub", id: "Gate", name: "pentest-verifier" }), model: { provider, id } },
-    prompt: header({ stage: "gate", candidate_id: undefined, engagement_dir: fixture.directory }),
-  });
-  const leadEvent = nextMessages(fixture.pi, 1);
-  const gateEvent = nextMessages(gate.pi, 1);
-  const candidate = await fixture.create();
-  const [lead] = await leadEvent;
-  const [event] = await gateEvent;
-  assert.equal(event.kind, "event");
-  assert.equal(event.data.event, "candidate.created");
-  assert.equal(event.case, candidate.id);
-  assert.equal(event.to, "@gate");
-  assert.equal(lead.seq, event.seq);
-});
-
-test("resident timeout rejects uncertain writes without replay or exec fallback and permits explicit restart", { timeout: 10_000 }, async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "praiseassistant-client-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const record = path.join(root, "requests.jsonl");
-  const script = `
-    const fs=require('node:fs'),readline=require('node:readline');
-    const file=${JSON.stringify(record)};
-    const blocked=!fs.existsSync(file);
-    readline.createInterface({input:process.stdin}).on('line',line=>{
-      const request=JSON.parse(line);
-      fs.appendFileSync(file,line+'\\n');
-      if(!blocked)process.stdout.write(JSON.stringify({id:request.id,ok:true,data:{mode:'source'}})+'\\n');
-    });
-  `;
-  const processes = [];
-  const client = acquireJsonClient(root, {
-    command: process.execPath, prefix: ["-e", script, "--"], timeoutMs: 250,
-    spawn(command, args, options) { const child = spawnProcess(command, args, options); processes.push(child); return child; },
-  });
-  t.after(() => client.release());
-  await assert.rejects(client.request(["message", "--data", "{}"]), /not replayed/);
-  assert.equal(processes.length, 1);
-  assert.equal(fs.readFileSync(record, "utf8").trim().split("\n").length, 1);
-  assert.deepEqual(await client.request(["scope"]), { mode: "source" });
-  assert.equal(processes.length, 2);
-  const requests = fs.readFileSync(record, "utf8").trim().split("\n").map(JSON.parse);
-  assert.deepEqual(requests.map((request) => request.args[0]), ["message", "scope"]);
-});
-
-test("resident response errors and process death are surfaced and cannot poison a fresh request", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const lease = acquireJsonClient(fixture.directory);
-  t.after(() => lease.release());
-  await assert.rejects(lease.request(["inbox", "--agent", "missing"]), /agent|registered|unknown/i);
-  assert.equal((await lease.request(["scope"])).mode, "source");
-  const child = fixture.processes[0];
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  child.kill("SIGKILL");
-  await exited;
-  assert.equal((await lease.request(["scope"])).mode, "source");
-  assert.equal(fixture.processes.length, 2);
-  await assert.rejects(lease.request(["serve"]), /invalid bound/);
-  await assert.rejects(lease.request(["show", "--engagement", "/other"]), /invalid bound/);
-});
-
-test("a failed batch leaves no partial authorized spawn record", async () => {
-  const exec = dispatchExec({ proof: { agent: "pentest-exploiter", model: "opencode-go/deepseek-v4.1-flash:high" } });
-  const pi = routedPi(exec);
-  const failed = await pi.handlers.tool_call[0]({
-    toolName: "task", input: { tasks: [
-      { task: header({ stage: "proof" }) }, { task: header({ stage: "verdict" }) },
-    ] },
-  });
-  assert.equal(failed.block, true);
-  assert.equal(failed.input, undefined);
-  const spawn = await pi.handlers.before_subagent_spawn[0]({
-    agent: "pentest-exploiter", invocationKind: "task", patterns: [],
-  });
-  assert.equal(spawn.block, true);
-});
-
-test("learning promotion, changed evidence and rollback refresh compact lesson context", { timeout: 20_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create();
-  const reviewer = { ...fixture.ctx, model: { provider: "opencode-go", id: "mimo-v2.6-flash" } };
-  const closed = await fixture.invoke("praiseassistant_transition", {
-    action: "verdict", candidate_id: candidate.id, decision: "rejected", reason: "synthetic closed control",
-  }, reviewer);
-  assert.equal(closed.details.ok, true, closed.content[0].text);
-  const observed = await fixture.invoke("praiseassistant_learning", {
-    command: "observe", candidate_id: candidate.id, summary: "Require owned evidence for this synthetic boundary", evidence: "trace.json",
-  });
-  assert.equal(observed.details.ok, true, observed.content[0].text);
-  const lesson = observed.details.data.lesson_id;
-  const evaluated = await fixture.invoke("praiseassistant_learning", {
-    command: "evaluate", lesson_id: lesson, cases: [
-      { id: "positive", expected: true, baseline: false, learned: true, evidence: "trace.json" },
-      { id: "negative", expected: false, baseline: false, learned: false, evidence: "trace.json" },
-    ],
-  });
-  assert.equal(evaluated.details.ok, true, evaluated.content[0].text);
-  assert.equal(evaluated.details.data.passed, true);
-  const promoted = await fixture.invoke("praiseassistant_learning", {
-    command: "promote", lesson_id: lesson, reason: "matched controls improved without regression",
-  }, reviewer);
-  assert.equal(promoted.details.ok, true, promoted.content[0].text);
-  const refreshed = await fixture.pi.handlers.before_agent_start[0]({ prompt: "next controlled turn" }, fixture.ctx);
-  assert.ok(JSON.parse(refreshed.message.content).lessons.some((entry) => entry.id === lesson));
-  // No event/revision change: retrieval must still revalidate anchored evidence.
-  const artifact = path.join(fixture.directory, "evidence", "trace.json");
-  const original = fs.readFileSync(artifact, "utf8");
-  fs.writeFileSync(artifact, '{"fixture":"mutated evidence"}');
-  const stale = await fixture.pi.handlers.before_agent_start[0]({ prompt: "fresh validation" }, fixture.ctx);
-  assert.deepEqual(JSON.parse(stale.message.content).lessons, []);
-  fs.writeFileSync(artifact, original);
-  const restored = await fixture.pi.handlers.before_agent_start[0]({ prompt: "restored evidence" }, fixture.ctx);
-  assert.ok(JSON.parse(restored.message.content).lessons.some((entry) => entry.id === lesson));
-  const rolledBack = await fixture.invoke("praiseassistant_learning", {
-    command: "rollback", lesson_id: lesson, reason: "explicit controlled deactivation",
-  });
-  assert.equal(rolledBack.details.ok, true, rolledBack.content[0].text);
-  const retired = await fixture.pi.handlers.before_agent_start[0]({ prompt: "after deactivation" }, fixture.ctx);
-  assert.deepEqual(JSON.parse(retired.message.content).lessons, []);
-});
-
-test("bounded frames fail closed and pending requests reject on resident process death", { timeout: 15_000 }, async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "praiseassistant-frames-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  for (const [mode, script, error] of [
-    ["malformed", "process.stdin.once('data',()=>process.stdout.write('not-json\\n'));", /invalid JSON/],
-    ["oversized", "process.stdin.once('data',()=>process.stdout.write('x'.repeat(1024*1024+1)));", /frame limit/],
-    ["death", "process.stdin.once('data',()=>process.exit(7));", /exited.*not replayed/],
-  ]) {
-    const directory = path.join(root, mode);
-    fs.mkdirSync(directory);
-    const client = acquireJsonClient(directory, { command: process.execPath, prefix: ["-e", script, "--"] });
-    t.after(() => client.release());
-    await assert.rejects(client.request(["scope"]), error);
-    await assert.rejects(client.request(["message", "--data", "x".repeat(1024 * 1024)]), /frame limit/);
-  }
-});
-
-test("queued aside checkpoints cannot skip undelivered messages after restart", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const recipient = await anotherFactory(t, fixture);
-  const address = JSON.parse(recipient.startup.message.content).agent;
-  recipient.pi.deliveryDeferred = true;
-  const queued = nextMessages(recipient.pi, 1);
-  const sent = await fixture.invoke("praiseassistant_message", {
-    action: "send", to: address, kind: "ask", data: { queued: "not durable yet" },
-  });
-  assert.equal(sent.details.ok, true);
-  await queued;
-  // Wait for the serialized drain/checkpoint, not a timer or poll.
-  await recipient.invoke("praiseassistant_message", { action: "read" });
-  await recipient.pi.handlers.session_shutdown[0]();
-  const pi = makePi();
-  pi.entries.push(...recipient.pi.entries);
-  const restored = await anotherFactory(t, fixture, {
-    pi, ctx: { ...recipient.ctx, sessionManager: { ...recipient.ctx.sessionManager, getEntries: () => pi.entries } },
-  });
-  const snapshot = JSON.parse(restored.startup.message.content);
-  assert.equal(snapshot.messages.length, 1);
-  assert.equal(snapshot.messages[0].seq, sent.details.data.seq);
-});
-
-test("durably delivered checkpoints suppress replay on a resumed factory", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const recipient = await anotherFactory(t, fixture);
-  const address = JSON.parse(recipient.startup.message.content).agent;
-  const delivered = nextMessages(recipient.pi, 1);
-  await fixture.invoke("praiseassistant_message", { action: "send", to: address, kind: "close", data: { delivered: true } });
-  await delivered;
-  await recipient.invoke("praiseassistant_message", { action: "read" });
-  await recipient.pi.handlers.session_shutdown[0]();
-  const pi = makePi();
-  pi.entries.push(...recipient.pi.entries);
-  const restored = await anotherFactory(t, fixture, {
-    pi, ctx: { ...recipient.ctx, sessionManager: { ...recipient.ctx.sessionManager, getEntries: () => pi.entries } },
-  });
-  assert.deepEqual(JSON.parse(restored.startup.message.content).messages, []);
-  assert.equal(pi.messages.length, 0);
-});
-
-function minimalPacket(finding_id = "C-1") {
-  return { hypothesis: "synthetic control", question: "Resolve the named gap",
-    relevant_sources: ["fixture:1"], observations: ["owned synthetic observation"],
-    evidence: ["trace.json"], proof_status: "unresolved", finding_id };
-}
-
-function narrowDispatchExec() {
-  return makeExec((args) => {
-    const stage = args[args.indexOf("--stage") + 1];
-    const tier = args[args.indexOf("--tier") + 1];
-    if (args.includes("register")) return { stdout: JSON.stringify({ agent: "aFixture", role: stage || "proof" }) };
-    if (args.includes("message")) return { stdout: '{"seq":1}' };
-    const agent = tier === "normal" ? CATALOG.stages[stage]
-      : tier === "deep" ? CATALOG.escalations[stage] : CATALOG.experts[stage];
-    const definition = CATALOG.roles[agent];
-    return { stdout: JSON.stringify({
-      stage, tier, agent, model: tier === "expert-max" ? definition.max_model : definition.models[0],
-      ...(args.includes("--packet") ? { packet: { ref: args[args.indexOf("--packet") + 1],
-        sha256: "a".repeat(64), data: minimalPacket() } } : {}),
-    }) };
-  });
-}
-
-test("tier metadata builds real fixed dispatch flags and rejects conflicts or skips", () => {
-  const metadata = { stage: "proof", engagement_dir: "/tmp/eng", tier: "expert",
-    packet: "packet.json", attempt: 17, reason: "named unresolved gap" };
-  assert.equal(validateHeader(metadata), null);
-  assert.deepEqual(buildDispatchArgs(metadata), ["--engagement", "/tmp/eng", "dispatch", "--stage", "proof",
-    "--tier", "expert", "--reason", "named unresolved gap", "--packet", "packet.json", "--attempt", "17"]);
-  for (const invalid of [
-    { escalated: false }, { attempt: 0 }, { attempt: "17" }, { attempt: undefined }, { packet: undefined },
-    { packet: "../packet.json" }, { packet: "/tmp/packet.json" }, { tier: "max" },
-    { reason: "é".repeat(257) }, { confidence: 1 }, { stage: "review" },
-  ]) assert.ok(validateHeader({ ...metadata, ...invalid }), JSON.stringify(invalid));
-  assert.ok(validateHeader({ stage: "review", engagement_dir: "/tmp/eng" }));
-});
-
-test("concurrent Pro HIGH and MAX routes bind exact effort without upgrade or substitution", async () => {
-  const exec = narrowDispatchExec();
-  const pi = routedPi(exec);
-  const items = ["expert", "expert-max"].map((tier) => ({
-    task: header({ tier, escalated: true, packet: "packet.json", attempt: tier === "expert" ? 1 : 2,
-      reason: "bounded substantive gap" }),
-    outputSchema: { type: "object", properties: { own: { type: "string" } } },
-  }));
-  const result = await pi.handlers.tool_call[0]({ toolName: "task", input: { tasks: items } });
-  assert.deepEqual(result.input.tasks.map((item) => item.model),
-    ["opencode-go/deepseek-v4-pro:high", "opencode-go/deepseek-v4-pro:max"]);
-  assert.deepEqual(result.input.tasks.map((item) => item.outputSchema), items.map((item) => item.outputSchema));
-  for (const item of result.input.tasks) {
-    const selected = await pi.handlers.before_subagent_spawn[0]({ agent: item.agent, patterns: [item.model] });
-    assert.equal(selected.model, item.model);
-  }
-  for (const patterns of [[], ["opencode-go/deepseek-v4-pro"], ["opencode-go/deepseek-v4-pro:low"],
-    ["opencode-go/deepseek-v4.1-flash:high"]]) {
-    assert.equal((await pi.handlers.before_subagent_spawn[0]({ agent: "pentest-exploiter-expert", patterns })).block, true);
-  }
-  assert.ok(exec.calls.every((args) => args.includes("--tier") && args.includes("--packet") && args.includes("--attempt")));
-});
-
-test("narrow task transcripts, oversized bodies and absent observed identity cannot authorize a spawn", async () => {
-  for (const body of ["x".repeat(4097), "Conversation:\nuser: old prompt\nassistant: old reply", "<|im_start|>assistant"]) {
-    const exec = narrowDispatchExec();
-    const pi = routedPi(exec);
-    const result = await pi.handlers.tool_call[0]({ toolName: "task", input: { task:
-      header({ tier: "deep", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }) + "\n" + body } });
-    assert.equal(result.block, true);
-    assert.equal(exec.calls.length, 0);
-    assert.equal((await pi.handlers.before_subagent_spawn[0]({ agent: "pentest-exploiter-deep", patterns: [] })), undefined);
-  }
-  const pi = routedPi(narrowDispatchExec());
-  const missing = await pi.handlers.tool_call[0]({ toolName: "task", input: { task: header() } }, {});
-  assert.equal(missing.block, true);
-  const inherited = await pi.handlers.tool_call[0]({ toolName: "task", input: {
-    context: "Conversation:\nuser: previous finding\nassistant: previous analysis", task: header({ tier: "deep", escalated: true,
-      packet: "packet.json", attempt: 1, reason: "gap" }),
-  } });
-  assert.equal(inherited.block, true);
-  const bounded = await pi.handlers.tool_call[0]({ toolName: "task", input: {
-    context: "Scope: isolated fixture. No external targets. Preserve the request budget.",
-    task: header({ tier: "deep", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }),
-  } });
-  assert.equal(bounded.input.agent, CATALOG.escalations.proof);
-  const oversizedShared = await pi.handlers.tool_call[0]({ toolName: "task", input: {
-    context: "x".repeat(4097),
-    task: header({ tier: "deep", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }),
-  } });
-  assert.equal(oversizedShared.block, true);
-});
-
-test("a dispatch cannot substitute a cheaper or expensive model for a configured tier", async () => {
-  for (const model of ["opencode-go/deepseek-v4-pro:max", "opencode-go/deepseek-v4.1-flash:high"]) {
-    const exec = makeExec(() => ({ stdout: JSON.stringify({ agent: "pentest-exploiter-expert", model }) }));
-    const pi = routedPi(exec);
-    const result = await pi.handlers.tool_call[0]({ toolName: "task", input: { task:
-      header({ tier: "expert", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }) } });
-    assert.equal(result.block, true);
-    assert.equal((await pi.handlers.before_subagent_spawn[0]({ agent: "pentest-exploiter-expert", patterns: [model] })).block, true);
-  }
-});
-
-test("expert startup uses whole bounded packet only and host stamps route reports/refusals", async (t) => {
-  const exec = narrowDispatchExec();
-  const pi = routedPi(exec);
-  t.after(() => pi.handlers.session_shutdown[0]());
-  const ctx = { ...contextFor(pi, "/tmp/eng", { kind: "sub", name: "pentest-exploiter-expert" }),
-    model: { provider: "opencode-go", id: "deepseek-v4-pro" } };
-  const result = await pi.handlers.before_agent_start[0]({ prompt:
-    header({ tier: "expert", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }) }, ctx);
-  const content = JSON.parse(result.message.content);
-  assert.equal(content.worker, "pentest-exploiter-expert");
-  assert.equal(content.tier, "expert");
-  assert.deepEqual(content.case, { id: "C-1", stage: "proof", tier: "expert" });
-  assert.deepEqual(content.packet.data, minimalPacket());
-  assert.equal("state" in content, false);
-  assert.equal("messages" in content, false);
-  assert.ok(Buffer.byteLength(result.message.content) <= 16000);
-  assert.equal(exec.calls.some((args) => args.includes("show") || args.includes("inbox")), false);
-  const invoke = toolInvoker(pi, ctx);
-  const invalid = await invoke("praiseassistant_message", {
-    action: "send", to: "@lead", kind: "close", data: { status: "rejected", execution_failure: "refusal" },
-  });
-  assert.equal(invalid.details.ok, false);
-  const sent = await invoke("praiseassistant_message", {
-    action: "send", to: "@lead", kind: "close",
-    data: { status: "unresolved", execution_failure: "refusal", worker: "lead", tier: "expert-max" },
-  });
-  assert.equal(sent.details.ok, true);
-  const command = exec.calls.find((args) => args.includes("message"));
-  assert.deepEqual(JSON.parse(command[command.indexOf("--data") + 1]), {
-    status: "unresolved", execution_failure: "refusal", worker: "pentest-exploiter-expert", tier: "expert",
-  });
-});
-
-test("scoped packet tool writes bounded whole JSON without applying the message data cap", async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create();
-  const data = { ...minimalPacket(candidate.id), observations: Array.from({ length: 6 }, (_, i) => `${i}:` + "x".repeat(450)) };
-  assert.ok(Buffer.byteLength(JSON.stringify(data)) > 2048);
-  const created = await fixture.invoke("praiseassistant_message", { action: "packet", candidate_id: candidate.id, data });
-  assert.equal(created.details.ok, true, created.content[0].text);
-  assert.match(created.details.data.ref, /^packet-[a-f0-9]{64}\.json$/);
-  const file = path.join(fixture.directory, "evidence", created.details.data.ref);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), data);
-  assert.equal(created.details.data.bytes, Buffer.byteLength(fs.readFileSync(file, "utf8")));
-  const mismatch = await fixture.invoke("praiseassistant_message", {
-    action: "packet", candidate_id: candidate.id, data: { ...data, finding_id: "different-case" },
-  });
-  assert.equal(mismatch.details.ok, false);
-  const oversized = await fixture.invoke("praiseassistant_message", {
-    action: "packet", data: { ...data, observations: ["x".repeat(8193)] },
-  });
-  assert.equal(oversized.details.ok, false);
-  const unknown = await fixture.invoke("praiseassistant_message", { action: "packet", data: { ...data, transcript: "history" } });
-  assert.equal(unknown.details.ok, false);
-});
-
-test("real CLI expert predecessors select HIGH then MAX and stale anchors cannot authorize another spawn", { timeout: 20_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create();
-  await fixture.invoke("praiseassistant_transition", { action: "gate", candidate_id: candidate.id, decision: "pass", reason: "synthetic source path" });
-  const packet = await fixture.invoke("praiseassistant_message", { action: "packet", candidate_id: candidate.id, data: minimalPacket(candidate.id) });
-  assert.equal(packet.details.ok, true, packet.content[0].text);
-  const ref = packet.details.data.ref;
-  let attempt;
-  let highAttempt;
-  const routes = [];
-  for (const tier of ["normal", "deep", "expert", "expert-max"]) {
-    const metadata = { stage: "proof", candidate_id: candidate.id, engagement_dir: fixture.directory, tier,
-      escalated: tier !== "normal", ...(tier === "normal" ? {} : { packet: ref, attempt, reason: "substantive cross-request gap" }) };
-    const dispatched = await fixture.pi.handlers.tool_call[0]({ toolName: "task", input: { task: header(metadata) } }, fixture.ctx);
-    assert.ok(dispatched.input, dispatched.reason);
-    routes.push(dispatched.input);
-    const workerPi = makePi();
-    const model = dispatched.input.model.replace(/:(high|max)$/, "");
-    const slash = model.indexOf("/");
-    const worker = await anotherFactory(t, fixture, {
-      pi: workerPi, prompt: dispatched.input.task,
-      ctx: { ...contextFor(workerPi, fixture.directory, { kind: "sub", name: dispatched.input.agent }),
-        model: { provider: model.slice(0, slash), id: model.slice(slash + 1) } },
-    });
-    assert.equal(worker.startup.message.customType, "praiseassistant-scope", worker.startup.message.content);
-    if (tier === "expert-max") {
-      assert.equal(JSON.parse(worker.startup.message.content).tier, tier);
-      continue;
-    }
-    const closed = await worker.invoke("praiseassistant_message", {
-      action: "send", to: "@lead", kind: "close", candidate_id: candidate.id,
-      data: { status: "unresolved", finding_id: candidate.id, hypothesis: "synthetic control",
-        evidence: ["trace.json", ref], contradictions: [], unresolved_questions: ["substantive cross-request gap"],
-        packet: ref, recommended_next_agent: null, execution_failure: "refusal", worker: "spoofed", tier: "normal" },
-      evidence: ["trace.json", ref],
-    });
-    assert.equal(closed.details.ok, true, closed.content[0].text);
-    attempt = closed.details.data.seq;
-    if (tier === "expert") highAttempt = attempt;
-    if (tier !== "normal") {
-      const projection = JSON.parse(worker.startup.message.content);
-      assert.equal(projection.tier, tier);
-      assert.equal("state" in projection, false);
-      assert.equal("messages" in projection, false);
-    }
-  }
-  assert.deepEqual(routes.map((route) => route.model), [
-    "opencode-go/deepseek-v4.1-flash:high", "opencode-go/deepseek-v4.1-flash:high",
-    "opencode-go/deepseek-v4-pro:high", "opencode-go/deepseek-v4-pro:max",
-  ]);
-  for (const route of routes.slice(2)) {
-    assert.equal((await fixture.pi.handlers.before_subagent_spawn[0]({ agent: route.agent, patterns: [route.model] })).model, route.model);
-  }
-  fs.writeFileSync(path.join(fixture.directory, "evidence", "trace.json"), '{"fixture":"changed current evidence"}');
-  const stale = await fixture.pi.handlers.tool_call[0]({ toolName: "task", input: { task: header({
-    stage: "proof", tier: "expert-max", escalated: true, candidate_id: candidate.id, engagement_dir: fixture.directory,
-    packet: ref, attempt: highAttempt, reason: "remaining concrete gap",
-  }) } }, fixture.ctx);
-  assert.equal(stale.block, true);
-  assert.match(stale.reason, /changed|current|stale|hash/i);
-});
-
-test("review lane requires confirmed current proofs and sends observed Blue judgment to the real CLI", { timeout: 20_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const candidate = await fixture.create();
-  const packet = await fixture.invoke("praiseassistant_message", { action: "packet", data: minimalPacket(candidate.id) });
-  assert.equal(packet.details.ok, true, packet.content[0].text);
-  let task = header({ stage: "review", candidate_id: candidate.id, engagement_dir: fixture.directory, packet: packet.details.data.ref });
-  const route = () => fixture.pi.handlers.tool_call[0]({ toolName: "task", input: { task } }, fixture.ctx);
-  assert.equal((await route()).block, true);
-  await fixture.invoke("praiseassistant_transition", { action: "gate", candidate_id: candidate.id, decision: "pass", reason: "synthetic gated path" });
-  for (const state of ["first", "second"]) {
-    const ref = `proof-${state}.json`;
-    fs.writeFileSync(path.join(fixture.directory, "evidence", ref), JSON.stringify({ state, owned: true }));
-    const proof = await fixture.invoke("praiseassistant_transition", { action: "reproduce", candidate_id: candidate.id,
-      run_id: state, clean_state_id: state, evidence: [ref] });
-    assert.equal(proof.details.ok, true, proof.content[0].text);
-  }
-  const verdict = await fixture.invoke("praiseassistant_transition", { action: "verdict", candidate_id: candidate.id,
-    decision: "confirmed", reason: "two synthetic clean states", evidence: ["trace.json"] },
-  { ...fixture.ctx, model: { provider: "opencode-go", id: "deepseek-v4.1-flash" } });
-  assert.equal(verdict.details.ok, true, verdict.content[0].text);
-  const reviewPacket = await fixture.invoke("praiseassistant_message", { action: "packet", data: {
-    ...minimalPacket(candidate.id), proof_status: "confirmed", evidence: ["proof-first.json", "proof-second.json", "trace.json"],
-  } });
-  assert.equal(reviewPacket.details.ok, true, reviewPacket.content[0].text);
-  task = header({ stage: "review", candidate_id: candidate.id, engagement_dir: fixture.directory, packet: reviewPacket.details.data.ref });
-  const before = await fixture.invoke("praiseassistant_state", { candidate_id: candidate.id });
-  assert.equal(before.details.data.candidate.report_ready, false);
-  const dispatched = await route();
-  assert.equal(dispatched.input.agent, "security-reviewer");
-  assert.equal(dispatched.input.model, "openai-codex/gpt-daybreak-blue-latest:high");
-  const workerPi = makePi();
-  const reviewer = await anotherFactory(t, fixture, {
-    pi: workerPi, prompt: task,
-    ctx: { ...contextFor(workerPi, fixture.directory, { kind: "sub", name: "security-reviewer" }),
-      model: { provider: "openai-codex", id: "gpt-daybreak-blue-latest" } },
-  });
-  const startup = JSON.parse(reviewer.startup.message.content);
-  assert.equal(startup.role, "review");
-  assert.equal("state" in startup, false);
-  fs.writeFileSync(path.join(fixture.directory, "evidence", "review.json"), '{"review":"owned independent synthetic assessment"}');
-  const approved = await reviewer.invoke("praiseassistant_transition", { action: "review", candidate_id: candidate.id,
-    decision: "approved", reason: "current minimal evidence independently reviewed", evidence: ["review.json"],
-    model: "spoofed/model" });
-  assert.equal(approved.details.ok, true, approved.content[0].text);
-  const state = await fixture.invoke("praiseassistant_state", { candidate_id: candidate.id });
-  assert.equal(state.details.data.candidate.review_status, "approved");
-  assert.equal(state.details.data.candidate.report_ready, true);
-  fs.writeFileSync(path.join(fixture.directory, "evidence", "proof-first.json"), '{"state":"changed"}');
-  const stale = await route();
-  assert.equal(stale.block, true);
-  const current = await fixture.invoke("praiseassistant_state", { candidate_id: candidate.id });
-  assert.equal(current.details.data.candidate.report_ready, false);
-});
-
-test("installed catalog authorizes a native scoped spawn without catalog injection", { timeout: 15_000 }, async (t) => {
-  const fixture = await localFixture(t);
-  const agentRoot = path.join(fixture.root, ".omp", "agent");
-  const extensions = path.join(agentRoot, "extensions");
-  fs.mkdirSync(extensions, { recursive: true });
-  for (const name of ["crew-router.js", "json-client.mjs"]) {
-    fs.copyFileSync(fileURLToPath(new URL(`../home/.omp/agent/extensions/${name}`, import.meta.url)), path.join(extensions, name));
-  }
-  fs.writeFileSync(path.join(agentRoot, "crew.json"), JSON.stringify(fixture.catalog));
-  const { createCrewRouter: installedRouter } = await import(pathToFileURL(path.join(extensions, "crew-router.js")).href);
-  const pi = makePi();
-  installedRouter(pi, { clientOptions: fixture.clientOptions });
-  t.after(() => pi.handlers.session_shutdown[0]());
-  const ctx = contextFor(pi, fixture.directory);
-  const routed = await pi.handlers.tool_call[0]({ toolName: "task", input: {
-    task: header({ stage: "plan", candidate_id: undefined, engagement_dir: fixture.directory }),
-  } }, ctx);
-  assert.equal(routed.block, undefined, routed.reason);
-  const spawned = await pi.handlers.before_subagent_spawn[0]({
-    agent: routed.input.agent, invocationKind: "task", patterns: [],
-  }, ctx);
-  assert.match(spawned.model, /\/[^/]+-flash:high$/);
-  const denied = await pi.handlers.before_subagent_spawn[0]({
-    agent: "pentest-finder-expert", invocationKind: "task", patterns: [],
-  }, ctx);
+  const denied = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
   assert.equal(denied.block, true);
 });
 
-test("caller-selected unexpected effort fails without authorizing a replacement model", async () => {
-  const pi = routedPi(narrowDispatchExec());
-  const result = await pi.handlers.tool_call[0]({ toolName: "task", input: {
-    model: "opencode-go/deepseek-v4-pro:max",
-    task: header({ tier: "expert", escalated: true, packet: "packet.json", attempt: 1, reason: "gap" }),
-  } });
-  assert.equal(result.block, true);
-  assert.match(result.reason, /no substitution/);
-  const spawn = await pi.handlers.before_subagent_spawn[0]({
-    agent: "pentest-exploiter-expert", patterns: ["opencode-go/deepseek-v4-pro:high"],
-  });
-  assert.equal(spawn.block, true);
+test("same-role child startup can arrive out of the task input order", async (t) => {
+  const f = await fixture(t);
+  const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "reordered",
+    input: { context: "offline", tasks: [{ agent: "finder", task: "first question" }, { agent: "finder", task: "second question" }] } }, f.lead.ctx);
+  const spawnChild = () => f.lead.pi.handlers.get("before_subagent_spawn")({
+    agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
+  const second = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
+  assert.equal((await spawnChild()).model, models.finder);
+  const secondIdentity = JSON.parse((await second.start(revised.input.tasks[1].task)).message.content);
+  const first = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
+  assert.equal((await spawnChild()).model, models.finder);
+  const firstIdentity = JSON.parse((await first.start(revised.input.tasks[0].task)).message.content);
+  assert.notEqual(firstIdentity.agent, secondIdentity.agent);
+  assert.equal(firstIdentity.parent, f.identity.agent);
+  assert.equal(secondIdentity.parent, f.identity.agent);
+  assert.equal((await spawnChild()).block, true);
 });
 
-test("narrow worker cannot register or report using an unexpected observed model", async (t) => {
-  const exec = narrowDispatchExec();
-  const pi = routedPi(exec);
-  t.after(() => pi.handlers.session_shutdown[0]());
-  const ctx = contextFor(pi, "/tmp/eng", { kind: "sub", name: "pentest-exploiter-expert" });
-  const startup = await pi.handlers.before_agent_start[0]({ prompt: header({
-    tier: "expert", escalated: true, packet: "packet.json", attempt: 1, reason: "gap",
-  }) }, ctx);
-  assert.equal(startup.message.customType, "praiseassistant-error");
-  assert.equal(exec.calls.some((args) => args.includes("register")), false);
-  const send = await toolInvoker(pi, ctx)("praiseassistant_message", { action: "send", to: "@lead",
-    kind: "close", data: { status: "unresolved", execution_failure: "model" } });
-  assert.equal(send.details.ok, false);
+test("persistent role changes are consulted for every new native task", async (t) => {
+  const f = await fixture(t);
+  await run("python3", ["-m", "praise", "setAgent", "--role", "finder", "--model", "fixture/new-finder:high"], { cwd: repository, env: f.env });
+  const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "changed",
+    input: { agent: "finder", task: "new configured route" } }, f.lead.ctx);
+  assert.equal(revised.block, undefined);
+  const response = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [models.finder] }, f.lead.ctx);
+  assert.equal(response.model, "fixture/new-finder:high");
+});
+
+test("legacy host cursors recover a worker only after durable delivery and preserve its lineage", async (t) => {
+  const f = await fixture(t);
+  const child = await routedChild(f, f.lead, "finder");
+  await f.lead.invoke("praise_message", { action: "send", to: child.identity.agent, kind: "ask", data: { need: "legacy" } });
+  const first = await notification(child.pi, (m) => m.data.need === "legacy");
+  const registration = child.pi.entries.find((e) => e.customType === "praise-registration");
+  const checkpoint = { type: "custom", customType: "praiseassistant-inbox",
+    data: { engagement: f.directory, agent: child.identity.agent, after: 0, cursor: first.seq, seqs: [first.seq] } };
+  const delivered = { type: "custom_message", customType: "praiseassistant-scope",
+    content: JSON.stringify({ agent: child.identity.agent, messages: [first] }) };
+  const settings = { role: "finder", parent: f.lead.ctx.agent.id, session: child.ctx.sessionManager.getSessionId(), id: child.ctx.agent.id };
+  await child.shutdown();
+  const restored = f.open({ ...settings, entries: [registration, delivered, checkpoint] });
+  const startup = await restored.start("resume without any manual metadata");
+  assert.equal(JSON.parse(startup.message.content).parent, f.identity.agent);
+  assert.equal(restored.pi.deliveries.length, 0);
+  await restored.shutdown();
+  const provisional = f.open({ ...settings, entries: [registration, checkpoint] });
+  await provisional.start("recover missing durable delivery");
+  assert.equal(provisional.pi.deliveries.length, 1);
+  assert.equal(JSON.parse(provisional.pi.deliveries[0].message.content).seq, first.seq);
+});
+
+test("same-process pool isolates engagement subscribers and refuses rebinding", async (t) => {
+  const f = await fixture(t);
+  const other = path.join(f.root, "other-eng");
+  await f.python("import json,sys; from praise.runtime import init_engagement; print(json.dumps(init_engagement(sys.argv[1],program='other owned fixture',basis='offline',assets=[sys.argv[2]])))", other, f.root);
+  const session = f.open({ directory: other });
+  const startup = await session.start();
+  const second = JSON.parse(startup.message.content);
+  assert.equal(f.processes.length, 2);
+  const failed = await f.lead.invoke("praise_message", { action: "send", to: second.agent, kind: "ask", data: { need: "cross scope" } });
+  assert.equal(failed.details.ok, false);
+  assert.equal(session.pi.deliveries.length, 0);
+  f.lead.ctx.cwd = other;
+  const rebound = await f.lead.invoke("praise_state", {});
+  assert.equal(rebound.details.ok, false);
+  assert.match(rebound.details.error, /cross-engagement/);
+});
+
+test("automatic completion is bounded, skips continuations and never duplicates after wake", async (t) => {
+  const f = await fixture(t);
+  const child = await routedChild(f, f.lead, "finder");
+  const end = child.pi.handlers.get("agent_end");
+  await end({ willContinue: true, messages: [] }, child.ctx);
+  assert.equal(child.pi.entries.filter((e) => e.customType === "praise-completion").length, 0);
+  await end({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "sensitive substantive result" }] }] }, child.ctx);
+  const completed = await notification(f.lead.pi, (m) => m.data.event === "agent.completed");
+  assert.equal(completed.from, child.identity.agent);
+  assert.equal(completed.kind, "close");
+  assert.equal(completed.data.status, "completed");
+  assert.doesNotMatch(JSON.stringify(completed), /sensitive substantive/);
+  await end({ messages: [] }, child.ctx);
+  await child.start("idle wake");
+  await end({ messages: [] }, child.ctx);
+  const state = await f.lead.invoke("praise_message", { action: "read" });
+  assert.equal(state.details.ok, true);
+  assert.equal(f.lead.pi.deliveries.filter((d) => JSON.parse(d.message.content).data.event === "agent.completed").length, 1);
+  await child.shutdown();
+  assert.equal(f.processes[0].killed, false);
+  await f.lead.shutdown();
+  assert.equal(f.processes[0].killed, true);
+});
+
+test("an interim close to a parent does not suppress automatic task completion", async (t) => {
+  const f = await fixture(t);
+  const child = await routedChild(f, f.lead, "finder");
+  const note = await child.invoke("praise_message", { action: "send", to: f.identity.agent,
+    kind: "close", data: { note: "local evidence ready; task is still running" } });
+  assert.equal(note.details.ok, true);
+  await child.pi.handlers.get("agent_end")({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, child.ctx);
+  const completed = await notification(f.lead.pi, (m) => m.data.event === "agent.completed");
+  assert.equal(completed.from, child.identity.agent);
+  assert.equal(completed.data.status, "completed");
+  assert.ok(completed.seq > note.details.data.seq);
+});
+
+test("resident accepts whole bounded JSON, shares one process and never replays uncertain writes", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "praise-client-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let launches = 0, child, writes = 0;
+  const options = { spawn() {
+    launches++;
+    child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => true;
+    child.stdin.on("data", (frame) => {
+      writes++;
+      const request = JSON.parse(frame.toString());
+      if (request.args[0] === "show") {
+        const reply = JSON.stringify({ id: request.id, ok: true, data: { text: "é".repeat(5000) } }) + "\n";
+        child.stdout.write(Buffer.from(reply).subarray(0, 101));
+        child.stdout.write(Buffer.from(reply).subarray(101));
+      } else child.emit("exit", 1);
+    });
+    return child;
+  } };
+  const first = acquireJsonClient(root, options), second = acquireJsonClient(root, options);
+  t.after(() => { first.release(); second.release(); });
+  assert.equal((await first.request(["show"])).text.length, 5000);
+  assert.equal((await second.request(["show"])).text.length, 5000);
+  assert.equal(launches, 1);
+  await assert.rejects(first.request(["message", "--data", "{}"]), /not replayed/);
+  await assert.rejects(second.request(["message", "--data", "{}"]), /not replayed/);
+  assert.equal(writes, 3);
+  assert.equal(launches, 1);
+  await assert.rejects(second.request(["install"]), /invalid bound/);
 });
