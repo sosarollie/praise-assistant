@@ -250,6 +250,17 @@ praise --engagement "$ENGAGEMENT" register \
 
 The model selected at registration becomes the observed model for that participant.
 
+## Automation
+
+Praise is designed for agent-driven communication, not manual user command entry. Once OMP
+workers are scheduled, they invoke the communication tools themselves and messages are
+delivered automatically into the recipient session at safe execution boundaries or
+through durable inbox recovery.
+
+Praise does not auto-start workers, auto-create tasks, or auto-send messages on its
+own. Scheduling and message content remain agent-controlled to keep coordination explicit
+and safe. Humans usually only initialize the engagement and launch the lead.
+
 ## Commands
 
 ```text
