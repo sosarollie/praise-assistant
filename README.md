@@ -69,14 +69,18 @@ Selections are saved atomically in `~/.omp/agent/praise.json`. Dispatch and lead
 | Role | Specialization | Provider | Recommended model |
 |---|---|---|---|
 | `lead` | Coordinate scope, specialist assignments, progress, and final synthesis | `opencode-go` | `cat-jam-free:xhigh` |
-| `planner` | Plan the authorized work, dependencies, and bounded task slices | `opencode-go` | `longcat-2.5-preview-free:high` |
-| `scout` | Map supplied surfaces and locate relevant code or artifacts | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `planner` | Plan the authorized work, dependencies, and bounded task slices | `opencode-go` | `step-5-preview-free:high` |
+| `scout` | Map supplied surfaces and locate relevant code or artifacts | `opencode-go` | `step-5-preview-free:high` |
 | `finder` | Investigate security issues and trace source evidence | `opencode-go` | `deepseek-v4.1-flash:high` |
-| `verifier` | Check evidence, reachability, and security invariants | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `verifier` | Check evidence, reachability, and security invariants | `opencode-go` | `step-5-preview-free:high` |
 | `exploiter` | Develop minimal reproductions within explicit authorization | `opencode-go` | `deepseek-v4.1-flash:high` |
 | `skeptic` | Challenge conclusions, assumptions, and alternative explanations | `opencode-go` | `glm-5.3-flash:high` |
 | `reviewer` | Independently review conclusions and supporting artifacts | `openai-codex` | `gpt-daybreak-blue-latest:high` |
-| `tester` | Validate proposed changes against the assigned requirements | `opencode-go` | `longcat-2.5-preview-free:high` |
+| `tester` | Validate proposed changes against the assigned requirements | `opencode-go` | `glm-5.3-flash:high` |
+
+These are the defaults for one reason: **the two evidence-producing roles (`finder`, `exploiter`) use one model family, and every checking role must come from a different family** so a reviewer is never grading its own class of reasoning. `deepseek-v4.1-flash` carries production because it traced the most distinct defects in comparison testing; `step-5-preview-free:high` carries checking and planning because it is also free and supports effort control; `glm-5.3-flash:high` covers second-opinion and change validation.
+
+Verify a model actually supports thinking before assigning an effort suffix — an unsupported suffix is silently ignored, so a selector like `provider/model:high` on a model with no effort levels costs you nothing and buys you nothing.
 
 Roles are fixed; users select the models assigned to them. Assign different model families when your engagement requires independent review.
 
