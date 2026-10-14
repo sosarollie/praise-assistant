@@ -2207,3 +2207,44 @@ def show(directory: str, candidate_id: str | None = None, *, compact: bool = Fal
         return {"directory": directory, "scope": scope, "candidates": candidates, "counts": counts}
     finally:
         conn.close()
+
+
+def set_role_model(role: str, model: str) -> dict:
+    """Update the installed role/model assignment for one existing role."""
+    role = _identifier(role, "role")
+    model = _identifier(model, "observed model")
+    home = Path.home()
+    crew_path = home / ".omp" / "agent" / "crew.json"
+    config_path = home / ".omp" / "agent" / "config.yml"
+    if not crew_path.is_file():
+        raise PraiseError("installed crew roles not found; run praise install first")
+    catalog = json.loads(crew_path.read_text(encoding="utf-8"))
+    if role == "lead":
+        catalog["lead_model"] = model
+        if "lead_recovery_model" in catalog:
+            catalog["lead_recovery_model"] = model
+    else:
+        roles = catalog.get("roles", {})
+        if role not in roles:
+            raise PraiseError(f"unknown role: {role}")
+        roles[role]["models"] = [model]
+    crew_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+    # Update generated OMP model override if present.
+    if config_path.is_file():
+        lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        updated = False
+        for index, line in enumerate(lines):
+            if line.strip() == f"{role}: {lines[0].split(chr(32))[0]}" or line.lstrip().startswith(f"{role}:"):
+                # only touch shallow four-space indented override lines
+                if line.startswith("    ") and not line.startswith("      "):
+                    lines[index] = f"    {role}: {model}\n"
+                    updated = True
+        if not updated:
+            # insert under agentModelOverrides if possible
+            for index, line in enumerate(lines):
+                if line.strip() == "agentModelOverrides:":
+                    lines.insert(index + 1, f"    {role}: {model}\n")
+                    updated = True
+                    break
+        config_path.write_text("".join(lines), encoding="utf-8")
+    return {"role": role, "model": model, "updated": True}

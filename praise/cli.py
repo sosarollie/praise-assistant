@@ -152,6 +152,9 @@ def _cmd_peers(args):
 def _cmd_scope(args):
     return runtime.load_scope(_engagement_dir(args))
 
+def _cmd_setrole(args):
+    return runtime.set_role_model(args.role, args.model)
+
 
 def _cmd_project(args):
     return runtime.project_messages(_engagement_dir(args))
@@ -253,6 +256,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("project", help="Recover the append-only audit projection")
     p.set_defaults(func=_cmd_project)
+
+    p = sub.add_parser("setrole", help="Change the model assigned to an existing role")
+    p.add_argument("--role", required=True)
+    p.add_argument("--model", required=True, help="Model selector")
+    p.set_defaults(func=_cmd_setrole)
 
     sub.add_parser("serve", help="Bound resident JSONL transport; no network listener")
 

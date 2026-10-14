@@ -264,12 +264,21 @@ and communication then happens automatically through Praise messages. Scheduling
 message content remain agent-controlled to keep coordination explicit and safe.
 Humans usually only initialize the engagement and launch the lead.
 
+## Changing A Role Model
+
+```sh
+praise setrole --role finder --model openai/gpt-4.1
+```
+
+This updates the installed role catalog and generated OMP model override.
+
 ## Commands
 
 ```text
 init       Initialize an engagement directory
 lead       Launch configured lead
 scope      Read scope without case or chat history
+setrole    Change the model assigned to an existing role
 register   Bind a session to a local agent id
 message    Send scoped JSON
 inbox      Read addressed messages
