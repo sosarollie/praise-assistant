@@ -55,6 +55,28 @@ def _cmd_init(args):
     )
 
 
+def _cmd_start_lead_agent(args):
+    init_result = runtime.init_engagement(
+        args.directory,
+        program=args.program,
+        basis=args.basis,
+        assets=args.asset,
+        mode=args.mode,
+        max_requests=args.max_requests,
+        interval_seconds=args.interval,
+        allowed_methods=args.method or ["GET"],
+    )
+    # launch native lead with remainder
+    inner = list(args.native_args or [])
+    if "--" in inner:
+        inner = inner[inner.index("--") + 1:]
+    lead_args = ["--engagement", init_result and args.directory, "lead", *inner]
+    # reuse native launcher path from _cmd_lead
+    args.native_args = inner
+    args.recover = None
+    return _cmd_lead(args)
+
+
 def _cmd_candidate(args):
     finding = runtime.read_json_input(args.input)
     if args.agent:
@@ -261,6 +283,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--role", required=True)
     p.add_argument("--model", required=True, help="Model selector")
     p.set_defaults(func=_cmd_setrole)
+
+    p = sub.add_parser("setAgent", help="Bind a session to an engagement agent id")
+    p.add_argument("--session", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--role", required=True, choices=["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"])
+    p.add_argument("--model", required=True)
+    p.add_argument("--candidate")
+    p.set_defaults(func=_cmd_register)
+
+    p = sub.add_parser("getAgents", help="Read a bounded scoped agent roster")
+    p.add_argument("--candidate")
+    p.set_defaults(func=_cmd_peers)
+
+    p = sub.add_parser("startLeadAgent", help="Initialize an engagement and start the configured lead")
+    p.add_argument("--directory", required=True, help="Absolute engagement directory to create")
+    p.add_argument("--program", required=True, help="Program name")
+    p.add_argument("--basis", required=True, help="Authorization basis")
+    p.add_argument("--asset", action="append", required=True, help="Allowed asset (repeatable)")
+    p.add_argument("--mode", choices=list(policy.ALLOWED_MODES), default="source")
+    p.add_argument("--max-requests", type=int, default=0, help="Request budget (default 0)")
+    p.add_argument("--interval", type=float, default=1.0, help="Throttle seconds (default 1.0)")
+    p.add_argument("--method", action="append", help="Allowed method (repeatable; default GET)")
+    p.add_argument("--recover", type=int, help="Explicit durable configured Lead execution-failure close sequence")
+    p.add_argument("native_args", nargs=argparse.REMAINDER, help="Native omp flags after --")
+    p.set_defaults(func=_cmd_start_lead_agent)
+
 
     sub.add_parser("serve", help="Bound resident JSONL transport; no network listener")
 
