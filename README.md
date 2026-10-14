@@ -12,14 +12,6 @@ All roles are intended primarily for cybersecurity engagements and environments.
 - A configured lead launcher.
 - Role/model catalog generation for installed OMP integrations.
 
-## How Agents Communicate
-
-1. Initialize an engagement and register each participant with a role and observed model.
-2. Send an addressed JSON message to another registered agent.
-3. The recipient receives it either through live push or later inbox recovery.
-4. Work is delegated by scheduling a specialist through OMP and exchanging messages afterward.
-5. Use `project` to recover the append-only audit projection when needed.
-
 ## Repository Layout
 
 
@@ -284,16 +276,11 @@ This updates the installed role catalog and generated OMP model override.
 ## Commands
 
 ```text
-init       Initialize an engagement directory
-lead       Launch configured lead
-scope      Read scope without case or chat history
-setrole    Change the model assigned to an existing role
-register   Bind a session to a local agent id
-message    Send scoped JSON
-inbox      Read addressed messages
-peers      Read scoped agent roster
-project    Recover audit projection
-serve      Bound JSONL transport
+python scripts/install.py                Installation command
+setAgent                                 Register or update an agent
+getAgents                                List registered agents
+startLeadAgent                           Start the configured lead and begin coordination
+setrole                                  Change the model assigned to an existing role
 ```
 
 ## Tests
