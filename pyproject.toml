@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "praiseassistant"
+name = "praise"
 version = "0.1.0"
 description = "Evidence-driven orchestration for authorized multi-agent security work"
 readme = "README.md"
@@ -12,10 +12,10 @@ license = {file = "LICENSE"}
 dependencies = []
 
 [project.scripts]
-praiseassistant = "praiseassistant.cli:main"
+praise = "praise.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["praiseassistant*"]
+include = ["praise*"]
 
 [tool.setuptools.package-data]
-praiseassistant = ["roles.json"]
+praise = ["roles.json"]

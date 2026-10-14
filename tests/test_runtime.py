@@ -1,4 +1,4 @@
-"""Regression tests for praiseassistant.runtime and the praiseassistant CLI.
+"""Regression tests for praise.runtime and the praise CLI.
 
 Covers the consumer-visible invariants of the control layer: scoped init,
 state transitions, two-repro distinctness, source-candidate gating without
@@ -17,12 +17,14 @@ import io
 import json
 import os
 import sys
+import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
-from praiseassistant import cli, policy, runtime
+from praise import cli, policy, runtime
 
 # Synthetic identity vectors; these tests do not invoke model providers.
 DS_PRO = "opencode-go/deepseek-v4-pro:high"
@@ -437,12 +439,25 @@ class TransitionRaceTests(RuntimeTestBase):
 
 
 class DispatchTests(RuntimeTestBase):
-    def test_plan_dispatch_needs_no_candidate(self):
-        _, eng = self._init_source()
-        result = runtime.dispatch(eng, "plan")
-        self.assertEqual(result["stage"], "plan")
-        self.assertEqual(result["agent"], "pentest-planner")
-        self.assertEqual(result["family"], "gpt")
+    def _packet(self, eng, candidate=None, ref="packet.json", **extra):
+        data = {"hypothesis": "input reaches sink", "question": "resolve the missing boundary",
+                "relevant_sources": ["src/a.py:10", "src/b.py:20"], "observations": ["branch not resolved"],
+                "evidence": ["e1.json"], "proof_status": "unresolved", "finding_id": candidate}
+        data.update(extra)
+        self._write_evidence(eng, ref, json.dumps(data).encode())
+        return ref
+
+    def _attempt(self, eng, candidate, tier="normal", packet="packet.json", **extra):
+        roles = runtime.load_roles()
+        worker = roles["stages" if tier == "normal" else "escalations" if tier == "deep" else "experts"]["discover"]
+        model = roles["roles"][worker]["models"][0]
+        sender = runtime.register_agent(eng, "session-" + tier, worker, "discover", model, candidate)["agent"]
+        data = {"status": "unresolved", "finding_id": candidate, "worker": worker, "tier": tier,
+                "hypothesis": "input reaches sink", "unresolved_questions": ["missing branch"],
+                "evidence": ["e1.json"], "packet": packet}
+        data.update(extra)
+        return runtime.send_message(eng, sender, model, "@lead", "close", data, candidate,
+                                    evidence=["e1.json", packet])["seq"]
 
     def test_proof_dispatch_requires_gated(self):
         _, eng = self._init_source()
@@ -450,71 +465,497 @@ class DispatchTests(RuntimeTestBase):
         with self.assertRaises(runtime.PraiseError):
             runtime.dispatch(eng, "proof", candidate_id=cand["id"])
         runtime.gate_candidate(eng, cand["id"], "pass", "ok", MIMO)
-        result = runtime.dispatch(eng, "proof", candidate_id=cand["id"])
-        self.assertEqual(result["stage"], "proof")
+        self.assertEqual(runtime.dispatch(eng, "proof", cand["id"])["stage"], "proof")
 
-    def test_verdict_dispatch_selects_different_family(self):
+    def test_verdict_no_fallback_on_family_conflict(self):
         _, eng = self._init_source()
-        cand = self._new_source_candidate(eng, producer=DS_PRO)
-        result = runtime.dispatch(eng, "verdict", candidate_id=cand["id"])
-        self.assertNotEqual(result["family"], "deepseek")
-        self.assertEqual(result["agent"], "pentest-skeptic")
+        roles = runtime.load_roles()
+        checker_model = roles["roles"][roles["stages"]["verdict"]]["models"][0]
+        cand = self._new_source_candidate(eng, producer=checker_model)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "verdict", cand["id"])
 
-    def test_verdict_dispatch_skips_producer_family(self):
+    def test_verdict_dispatch_selects_independent_configured_model(self):
         _, eng = self._init_source()
-        cand = self._new_source_candidate(eng, producer=GLM)
-        result = runtime.dispatch(eng, "verdict", candidate_id=cand["id"])
-        self.assertNotEqual(result["family"], "glm")
+        cand = self._new_source_candidate(eng, producer=DS_FLASH)
+        result = runtime.dispatch(eng, "verdict", cand["id"])
+        self.assertNotEqual(result["family"], runtime.model_family(DS_FLASH))
 
-    def test_dispatch_requires_candidate_for_verdict(self):
+    def test_dispatch_requires_candidate_and_attested_engagement(self):
         _, eng = self._init_source()
         with self.assertRaises(runtime.PraiseError):
             runtime.dispatch(eng, "verdict")
-
-    def test_dispatch_requires_an_attested_engagement(self):
         with self.assertRaises(runtime.PraiseError):
             runtime.dispatch(self.root, "plan")
 
-    def test_escalation_requires_a_reason(self):
+    def test_escalation_cannot_skip_predecessor_or_use_confidence(self):
         _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
         with self.assertRaises(runtime.PraiseError):
-            runtime.dispatch(eng, "discover", escalated=True)
-        result = runtime.dispatch(eng, "discover", escalated=True, reason="cross-file trace unresolved")
-        self.assertEqual(result["agent"], "pentest-finder-deep")
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="important", packet=packet)
+        attempt = self._attempt(eng, candidate, confidence=0.99)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="expert", reason="complex", packet=packet, attempt=attempt)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, False, "gap", tier="deep", packet=packet, attempt=attempt)
+        result = runtime.dispatch(eng, "discover", candidate, True, "missing branch", packet=packet, attempt=attempt)
+        self.assertEqual(result["agent"], runtime.load_roles()["escalations"]["discover"])
+        self.assertEqual(result["packet"]["data"]["finding_id"], candidate)
+
+    def test_each_expert_tier_requires_current_predecessor(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        roles = runtime.load_roles()
+        for previous, target in (("normal", "deep"), ("deep", "expert"), ("expert", "expert-max")):
+            packet = self._packet(eng, candidate, ref=previous + ".json")
+            attempt = self._attempt(eng, candidate, previous, packet)
+            result = runtime.dispatch(eng, "discover", candidate, tier=target, reason="missing branch",
+                                      packet=packet, attempt=attempt)
+            agent = roles["escalations" if target == "deep" else "experts"]["discover"]
+            expected = roles["roles"][agent]["max_model"] if target == "expert-max" else roles["roles"][agent]["models"][0]
+            self.assertEqual(result["model"], expected)
+            self.assertEqual(result["tier"], target)
+
+    def test_explicit_max_identity_cannot_claim_a_high_predecessor(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
+        roles = runtime.load_roles()
+        worker = roles["experts"]["discover"]
+        model = roles["roles"][worker]["max_model"]
+        actor = runtime.register_agent(eng, "wrong-effort", worker, "discover", model, candidate)["agent"]
+        data = {"status": "unresolved", "finding_id": candidate, "worker": worker, "tier": "expert",
+                "unresolved_questions": ["unresolved branch"]}
+        attempt = runtime.send_message(eng, actor, model, "@lead", "close", data, candidate,
+                                       evidence=["e1.json", packet])["seq"]
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="expert-max", reason="gap",
+                             packet=packet, attempt=attempt)
+
+    def test_stale_packet_and_superseded_attempt_fail_closed(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
+        attempt = self._attempt(eng, candidate)
+        self._packet(eng, candidate, question="a different question")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="gap", packet=packet, attempt=attempt)
+        self._attempt(eng, candidate)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="gap", packet=packet, attempt=attempt)
+
+    def test_packet_rejects_transcripts_unknown_fields_and_escape(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        for extra in ({"history": ["entire conversation"]}, {"hypothesis": "x" * 1025},
+                      {"evidence": ["../outside.json"]}, {"finding_id": "different"}):
+            packet = self._packet(eng, candidate, **extra)
+            with self.assertRaises((runtime.PraiseError, ValueError)):
+                runtime.dispatch(eng, "discover", candidate, tier="deep", reason="gap", packet=packet, attempt=1)
+
+    def test_refusal_cannot_be_rejection_or_max_substantive_gap(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
+        with self.assertRaises(runtime.PraiseError):
+            self._attempt(eng, candidate, status="rejected", execution_failure="refusal")
+        attempt = self._attempt(eng, candidate, "expert", packet, execution_failure="refusal", unresolved_questions=[])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="expert-max", reason="retry", packet=packet, attempt=attempt)
+
+    def test_predecessor_observed_model_and_substantive_gap_are_required(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
+        attempt = self._attempt(eng, candidate, unresolved_questions=[], confidence=1.0, complexity="high")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="important", packet=packet, attempt=attempt)
+        worker = runtime.load_roles()["stages"]["discover"]
+        wrong = runtime.register_agent(eng, "wrong-model", worker, "discover", GLM, candidate)["agent"]
+        data = {"worker": worker, "tier": "normal", "finding_id": candidate, "status": "unresolved",
+                "packet": packet, "unresolved_questions": ["missing branch"]}
+        attempt = runtime.send_message(eng, wrong, GLM, "@lead", "close", data, candidate,
+                                       evidence=["e1.json", packet])["seq"]
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="gap", packet=packet, attempt=attempt)
+
+    def test_lead_can_create_narrower_packet_after_worker_report(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        original = self._packet(eng, candidate)
+        attempt = self._attempt(eng, candidate)
+        model = runtime.load_roles()["lead_model"]
+        lead = runtime.register_agent(eng, "lead", "Lead", "lead", model)["agent"]
+        with open(os.path.join(eng, "evidence", original), encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["question"] = "only inspect the missing authorization branch"
+        created = runtime.create_packet(eng, data, model, lead)
+        self.assertEqual(created, runtime.create_packet(eng, data, model, lead))
+        result = runtime.dispatch(eng, "discover", candidate, tier="deep", reason="missing branch",
+                                  packet=created["ref"], attempt=attempt)
+        self.assertEqual(result["packet"]["sha256"], created["sha256"])
+        self._write_evidence(eng, "unanchored.json", b"new unreviewed observation")
+        data["evidence"] = ["unanchored.json"]
+        unrelated = runtime.create_packet(eng, data, model, lead)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "discover", candidate, tier="deep", reason="gap",
+                             packet=unrelated["ref"], attempt=attempt)
+
+    def test_packet_creator_is_bounded_confined_and_never_clobbers(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        original = self._packet(eng, candidate)
+        with open(os.path.join(eng, "evidence", original), encoding="utf-8") as fh:
+            data = json.load(fh)
+        created = runtime.create_packet(eng, data, DS_FLASH)
+        self.assertEqual(created["ref"], "packet-" + created["sha256"] + ".json")
+        self._write_evidence(eng, created["ref"], b"tampered")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.create_packet(eng, data, DS_FLASH)
+        for bad in ({**data, "history": ["chat"]}, {**data, "evidence": ["../outside"]},
+                    {**data, "source_excerpts": ["界" * 1000]}):
+            with self.assertRaises((runtime.PraiseError, ValueError)):
+                runtime.create_packet(eng, bad, DS_FLASH)
+
+    def test_deep_independence_exception_requires_current_two_proofs(self):
+        _, eng = self._init_source()
+        roles = runtime.load_roles()
+        checker_model = roles["roles"][roles["stages"]["verdict"]]["models"][0]
+        candidate = self._new_source_candidate(eng, producer=checker_model)["id"]
+        packet = self._packet(eng, candidate)
+        runtime.gate_candidate(eng, candidate, "pass", "source path", DS_FLASH)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "verdict", candidate, tier="deep", reason="family conflict", packet=packet)
+        for index in range(2):
+            ref = f"proof-{index}.json"
+            self._write_evidence(eng, ref, f"clean-state evidence {index}".encode())
+            runtime.add_reproduction(eng, candidate, f"run-{index}", f"clean-{index}", ref, DS_FLASH)
+        result = runtime.dispatch(eng, "verdict", candidate, tier="deep", reason="family conflict", packet=packet)
+        self.assertNotIn(result["family"], {runtime.model_family(checker_model), runtime.model_family(DS_FLASH)})
+        self._write_evidence(eng, "proof-0.json", b"changed")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "verdict", candidate, tier="deep", reason="family conflict", packet=packet)
 
 
-class ChatTests(RuntimeTestBase):
-    def test_chat_requires_ask_or_close(self):
-        _, eng = self._init_source()
-        with self.assertRaises(runtime.PraiseError):
-            runtime.record_event(eng, "lead", GPT, "no ask or close")
-        with self.assertRaises(runtime.PraiseError):
-            runtime.record_event(eng, "lead", GPT, "both", ask="a", close="c")
+class FinalReviewTests(RuntimeTestBase):
+    _packet = DispatchTests._packet
 
-    def test_concurrent_chat_has_one_ordered_entry_per_committed_event(self):
+    def _confirmed(self, name="eng"):
+        _, eng = self._init_source(name)
+        candidate = self._new_source_candidate(eng)["id"]
+        runtime.gate_candidate(eng, candidate, "pass", "reachable", DS_FLASH)
+        for index in range(2):
+            ref = f"proof-{index}.json"
+            self._write_evidence(eng, ref, f"clean proof {index}".encode())
+            runtime.add_reproduction(eng, candidate, f"run-{index}", f"clean-{index}", ref, DS_FLASH)
+        self._write_evidence(eng, "verdict.json", b"independent evidence analysis")
+        runtime.record_verdict(eng, candidate, "confirmed", "two clean proofs", GLM, ["verdict.json"])
+        return eng, candidate
+
+    def test_current_proof_change_invalidates_final_review_readiness(self):
+        eng, candidate = self._confirmed()
+        model = runtime.load_roles()["roles"][runtime.load_roles()["stages"]["review"]]["models"][0]
+        self._write_evidence(eng, "review.json", b"independent current review")
+        runtime.record_review(eng, candidate, "approved", "current evidence", model, ["review.json"])
+        self._write_evidence(eng, "proof-0.json", b"changed proof")
+        state = runtime.show(eng, candidate)["candidate"]
+        self.assertEqual(state["review_status"], "stale")
+        self.assertFalse(state["report_ready"])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.record_review(eng, candidate, "approved", "cannot refresh stale proof", model, ["review.json"])
+
+    def test_review_packet_requires_current_representative_proof_pair_only(self):
+        eng, candidate = self._confirmed()
+        packet = self._packet(eng, candidate, proof_status="confirmed")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "review", candidate, packet=packet)
+        self._write_evidence(eng, "unrelated.json", b"unrelated engagement artifact")
+        packet = self._packet(eng, candidate, proof_status="confirmed",
+                              evidence=["proof-0.json", "proof-1.json", "unrelated.json"])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "review", candidate, packet=packet)
+        packet = self._packet(eng, candidate, proof_status="confirmed", evidence=["proof-0.json", "proof-1.json"])
+        selected = runtime.dispatch(eng, "review", candidate, packet=packet)
+        self.assertEqual(set(selected["case"]), {"id", "status", "producer_models", "review_status", "report_ready"})
+
+    def test_confirmed_case_requires_current_approved_review_for_report_and_patch(self):
+        eng, candidate = self._confirmed()
+        packet = self._packet(eng, candidate, proof_status="confirmed",
+                              evidence=["e1.json", "proof-0.json", "proof-1.json"])
+        self.assertFalse(runtime.show(eng, candidate)["candidate"]["report_ready"])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "patch", candidate)
+        selected = runtime.dispatch(eng, "review", candidate, packet=packet)
+        reviewer = runtime.register_agent(eng, "reviewer", selected["agent"], "review", selected["model"], candidate)["agent"]
+        self._write_evidence(eng, "review.json", b"review: current proofs independently assessed")
+        result = runtime.record_review(eng, candidate, "approved", "current evidence reviewed", selected["model"],
+                                       ["review.json"], reviewer)
+        self.assertTrue(result["report_ready"])
+        self.assertEqual(result["_messages"][0]["to"], "@patch")
+        self.assertEqual(runtime.show(eng, candidate, compact=True)["candidate"]["review_status"], "approved")
+        self.assertEqual(runtime.dispatch(eng, "patch", candidate)["stage"], "patch")
+        self._write_evidence(eng, "review.json", b"changed")
+        self.assertFalse(runtime.get_candidate(eng, candidate)["report_ready"])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "patch", candidate)
+
+    def test_review_cannot_run_on_source_only_or_reuse_case_evidence(self):
         _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = self._packet(eng, candidate)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.dispatch(eng, "review", candidate, packet=packet)
+        eng, candidate = self._confirmed("confirmed")
+        model = runtime.load_roles()["roles"][runtime.load_roles()["stages"]["review"]]["models"][0]
+        with self.assertRaises(runtime.PraiseError):
+            runtime.record_review(eng, candidate, "approved", "reuse", model, ["proof-0.json"])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.record_review(eng, candidate, "approved", "no own evidence", model, [])
+
+    def test_new_review_decision_supersedes_readiness_without_reopening_verdict(self):
+        eng, candidate = self._confirmed()
+        model = runtime.load_roles()["roles"][runtime.load_roles()["stages"]["review"]]["models"][0]
+        self._write_evidence(eng, "review.json", b"independent review")
+        runtime.record_review(eng, candidate, "approved", "approved", model, ["review.json"])
+        self._write_evidence(eng, "challenge.json", b"review identifies unanswered boundary")
+        result = runtime.record_review(eng, candidate, "needs-more-proof", "boundary unresolved", model, ["challenge.json"])
+        self.assertFalse(result["report_ready"])
+        self.assertEqual(runtime.get_candidate(eng, candidate)["status"], "confirmed")
+        self.assertEqual(result["_messages"][0]["to"], "@lead")
+
+    def test_explicit_max_cannot_approve_the_high_review_lane(self):
+        eng, candidate = self._confirmed()
+        roles = runtime.load_roles()
+        model = roles["roles"][roles["escalations"]["verdict"]]["models"][0]
+        self._write_evidence(eng, "review.json", b"independent synthetic review")
+        with self.assertRaises(runtime.PraiseError):
+            runtime.record_review(eng, candidate, "approved", "wrong effort", model, ["review.json"])
+
+
+class MessageTests(RuntimeTestBase):
+    def _agent(self, eng, session, role="discover", model=DS_FLASH, candidate=None):
+        return runtime.register_agent(eng, session, session, role, model, candidate)["agent"]
+
+    def test_addressed_messages_and_replies_do_not_advance_candidates(self):
+        _, eng = self._init_source()
+        finder = self._agent(eng, "finder")
+        candidate = self._new_source_candidate(eng, producer=DS_FLASH, producer_agent=finder)["id"]
+        gate = self._agent(eng, "gate", "gate", MIMO, candidate)
+        outsider = self._agent(eng, "outsider", "proof", DS_PRO, candidate)
+        sent = runtime.send_message(eng, finder, DS_FLASH, gate, "ask", {"need": "reachability"}, candidate)
+        received = runtime.inbox(eng, gate)
+        question = next(m for m in received["messages"] if m["seq"] == sent["seq"])
+        self.assertEqual(question["data"], {"need": "reachability"})
+        self.assertEqual(runtime.get_candidate(eng, candidate)["status"], "candidate")
+        self.assertEqual(runtime.inbox(eng, outsider)["messages"], [])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.send_message(eng, outsider, DS_PRO, finder, "reply", {"answer": "spoof"}, candidate, sent["seq"])
+        reply = runtime.send_message(eng, gate, MIMO, finder, "reply", {"reachable": True}, candidate, sent["seq"])
+        self.assertEqual(runtime.inbox(eng, finder)["messages"][-1]["reply"], sent["seq"])
+        self.assertGreater(reply["seq"], sent["seq"])
+
+    def test_retries_are_idempotent_but_changed_content_is_rejected(self):
+        _, eng = self._init_source()
+        sender = self._agent(eng, "sender")
+        recipient = self._agent(eng, "recipient", "gate", MIMO)
+        first = runtime.send_message(eng, sender, DS_FLASH, recipient, "ask", {"need": "trace"}, key="call-1")
+        repeated = runtime.send_message(eng, sender, DS_FLASH, recipient, "ask", {"need": "trace"}, key="call-1")
+        self.assertEqual(repeated["seq"], first["seq"])
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(repeated["_messages"], [])
+        with self.assertRaises(runtime.PraiseError):
+            runtime.send_message(eng, sender, DS_FLASH, recipient, "ask", {"need": "different"}, key="call-1")
+        self.assertEqual([m["seq"] for m in runtime.inbox(eng, recipient)["messages"]], [first["seq"]])
+
+    def test_inbox_pagination_preserves_old_handoffs_and_skips_unrelated_tasks(self):
+        _, eng = self._init_source()
+        sender = self._agent(eng, "sender")
+        recipient = self._agent(eng, "recipient", "gate", MIMO)
+        other = self._agent(eng, "other", "proof", DS_PRO)
+        expected = []
+        for index in range(40):
+            expected.append(runtime.send_message(eng, sender, DS_FLASH, recipient, "ask", {"index": index})["seq"])
+            runtime.send_message(eng, sender, DS_FLASH, other, "close", {"unrelated": index})
+        cursor, received = 0, []
+        while True:
+            page = runtime.inbox(eng, recipient, cursor, 7)
+            received.extend(m["seq"] for m in page["messages"])
+            self.assertLessEqual(len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode()), runtime.MAX_INBOX_BYTES)
+            cursor = page["cursor"]
+            if not page["more"]:
+                break
+        self.assertEqual(received, expected)
+        self.assertEqual(runtime.inbox(eng, recipient, cursor)["messages"], [])
+
+    def test_new_commit_cannot_be_skipped_by_an_empty_page_high_water_mark(self):
+        _, eng = self._init_source()
+        sender = self._agent(eng, "sender")
+        recipient = self._agent(eng, "recipient", "gate", MIMO)
+        reader = runtime.connect(eng)
+        inserted = []
+        def commit_between_page_and_cursor(sql):
+            if "MAX(seq)" not in sql or inserted:
+                return
+            writer = sqlite3.connect(os.path.join(eng, "state.sqlite3"), isolation_level=None)
+            writer.row_factory = sqlite3.Row
+            try:
+                with runtime._tx(writer):
+                    inserted.append(runtime.emit_message(
+                        writer, role="discover", model=DS_FLASH, sender=sender, to=recipient,
+                        kind="ask", data={"need": "late trace"},
+                    )["seq"])
+            finally:
+                writer.close()
+        reader.set_trace_callback(commit_between_page_and_cursor)
+        with patch.object(runtime, "connect", return_value=reader):
+            empty = runtime.inbox(eng, recipient)
+        self.assertEqual(empty["messages"], [])
+        recovered = runtime.inbox(eng, recipient, empty["cursor"])
+        self.assertEqual([m["seq"] for m in recovered["messages"]], inserted)
+
+    def test_message_bounds_identity_and_reserved_event_kind(self):
+        _, eng = self._init_source()
+        sender = self._agent(eng, "sender")
+        for kind, data, model, target in (
+            ("event", {"event": "gate.passed"}, DS_FLASH, "@proof"),
+            ("ask", {"text": "界" * 700}, DS_FLASH, "@lead"),
+            ("ask", {"number": float("nan")}, DS_FLASH, "@lead"),
+            ("ask", {}, GPT, "@lead"),
+            ("ask", {}, DS_FLASH, "a9999"),
+        ):
+            with self.assertRaises(runtime.PraiseError):
+                runtime.send_message(eng, sender, model, target, kind, data)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.register_agent(eng, "sender", "sender", "proof", DS_FLASH)
+        with self.assertRaises(runtime.PraiseError):
+            runtime.register_agent(eng, "bad", "forged\n### entry", "discover", DS_FLASH)
+        lead = self._agent(eng, "lead", "lead", GPT)
+        self.assertEqual(runtime.inbox(eng, lead)["messages"], [])
+
+    def test_concurrent_messages_project_once_in_commit_order(self):
+        _, eng = self._init_source()
+        sender = self._agent(eng, "sender")
+        lead = self._agent(eng, "lead", "lead", GPT)
         with ThreadPoolExecutor(max_workers=8) as workers:
-            events = list(workers.map(
-                lambda index: runtime.record_event(
-                    eng, "scout", DS_FLASH, f"event-{index}\n### forged-entry", close="fixture completed"
+            messages = list(workers.map(
+                lambda index: runtime.send_message(
+                    eng, sender, DS_FLASH, lead, "close", {"index": index, "text": "\n### forged-entry"},
                 ),
                 range(16),
             ))
+        runtime.project_messages(eng)
+        self.assertEqual(runtime.project_messages(eng)["projected"], 0)
         with open(os.path.join(eng, "agentschat.md"), encoding="utf-8") as fh:
             headers = [line for line in fh if line.startswith("### ")]
-        sequences = [int(line.rsplit("seq=", 1)[1]) for line in headers]
-        self.assertEqual(sequences, sorted(event["seq"] for event in events))
-        self.assertTrue(all("| eng |" in header for header in headers))
-        conn = runtime.connect(eng)
+        self.assertEqual(
+            [int(line.rsplit("seq=", 1)[1]) for line in headers],
+            sorted(m["seq"] for m in messages),
+        )
+        self.assertEqual([m["data"]["index"] for m in runtime.inbox(eng, lead)["messages"]],
+                         [m["data"]["index"] for m in sorted((m["_messages"][0] for m in messages), key=lambda m: m["seq"])])
+
+    def test_workflow_topics_case_filter_and_transactional_handoff(self):
+        _, eng = self._init_source()
+        finder = self._agent(eng, "finder")
+        first = self._new_source_candidate(eng, producer=DS_FLASH, producer_agent=finder)["id"]
+        second = self._new_source_candidate(eng, producer=DS_FLASH, producer_agent=finder)["id"]
+        gate = self._agent(eng, "gate", "gate", MIMO, first)
+        self.assertEqual([m["case"] for m in runtime.inbox(eng, gate)["messages"]], [first])
+        with patch.object(runtime, "emit_message", side_effect=RuntimeError("disk fixture failure")):
+            with self.assertRaises(RuntimeError):
+                runtime.gate_candidate(eng, first, "pass", "reachable", MIMO, gate)
+        self.assertEqual(runtime.get_candidate(eng, first)["status"], "candidate")
+        held = runtime.gate_candidate(eng, first, "hold", "missing ownership proof", MIMO, gate)
+        self.assertEqual(runtime.inbox(eng, finder)["messages"][-1]["data"]["event"], "gate.held")
+        self.assertEqual(held["_messages"][0]["to"], finder)
+        runtime.gate_candidate(eng, first, "pass", "trace complete", MIMO, gate)
+        proof = self._agent(eng, "proof", "proof", DS_PRO, first)
+        self.assertEqual(runtime.inbox(eng, proof)["messages"][-1]["data"]["event"], "gate.passed")
+        self.assertEqual(runtime.get_candidate(eng, second)["status"], "candidate")
+        lead = self._agent(eng, "lead", "lead", GPT)
+        runtime.gate_candidate(eng, second, "drop", "fixture false positive", MIMO)
+        closed = [m for m in runtime.inbox(eng, lead)["messages"] if m["to"] == "@learning"]
+        self.assertEqual([(m["case"], m["data"]["next"]) for m in closed], [(second, "learn.observe")])
+
+    def test_v1_migration_preserves_events_history_and_audit(self):
+        _, eng = self._init_source()
+        conn = sqlite3.connect(os.path.join(eng, "state.sqlite3"))
         try:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 16)
+            conn.executescript("""
+                DROP TABLE messages;
+                DROP TABLE participants;
+                ALTER TABLE candidates DROP COLUMN producer_agent;
+                ALTER TABLE reproductions DROP COLUMN producer_agent;
+                CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, model TEXT,
+                    summary TEXT, ask TEXT, close TEXT, evidence_json TEXT, created_at TEXT);
+                UPDATE meta SET value='1' WHERE key='schema_version';
+            """)
+            conn.execute("INSERT INTO events VALUES (7,?,?,?,?,?,?,?)",
+                         ("finder", DS_FLASH, "preserved", "gate candidate", None, "[]", "2026-10-01T00:00:00+00:00"))
+            conn.commit()
         finally:
             conn.close()
+        log = os.path.join(eng, "agentschat.md")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("original audit\n### 2026-10-01T00:00:00Z | finder | fixture | eng | seq=7\nASK: gate candidate\n\n")
+        lead = self._agent(eng, "lead", "lead", GPT)
+        self.assertEqual(runtime.inbox(eng, lead)["messages"], [])
+        conn = runtime.connect(eng)
+        try:
+            migrated = conn.execute("SELECT * FROM messages WHERE seq=7").fetchone()
+            self.assertEqual(json.loads(migrated["data_json"]), {"summary": "preserved", "ask": "gate candidate"})
+            self.assertEqual((migrated["model"], migrated["created_at"]), (DS_FLASH, "2026-10-01T00:00:00+00:00"))
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+        finally:
+            conn.close()
+        runtime.register_agent(eng, "lead", "lead", "lead", GPT)
+        sent = runtime.send_message(eng, lead, GPT, lead, "ask", {"need": "new work"})
+        self.assertEqual([m["seq"] for m in runtime.inbox(eng, lead)["messages"]], [sent["seq"]])
+        runtime.project_messages(eng)
+        with open(log, encoding="utf-8") as fh:
+            audit = fh.read()
+        self.assertTrue(audit.startswith("original audit\n"))
+        self.assertEqual(audit.count("seq=7"), 1)
 
-    def test_chat_identity_cannot_forge_an_entry(self):
+    def test_compact_state_is_whole_bounded_data_not_shared_chat(self):
         _, eng = self._init_source()
-        with self.assertRaises(runtime.PraiseError):
-            runtime.record_event(eng, "scout\n### forged", DS_FLASH, "summary", close="done")
+        for index in range(18):
+            self._new_source_candidate(eng, id=f"C-{index}")
+        state = runtime.show(eng, compact=True)
+        self.assertEqual(state["counts"], {"candidate": 18})
+        self.assertTrue(state["more"])
+        self.assertEqual(len(state["candidates"]), 16)
+        self.assertLessEqual(len(json.dumps(state, separators=(",", ":")).encode()), 4096)
+        candidate = runtime.show(eng, "C-0", compact=True)["candidate"]
+        self.assertEqual(candidate["source_ref"], "src/a.py:10")
+        self.assertEqual(candidate["refs"], ["e1.json"])
+
+
+class ResidentTransportTests(RuntimeTestBase):
+    def test_bound_process_handles_multiple_commands_and_survives_a_refusal(self):
+        _, eng = self._init_source()
+        _, sibling = self._init_source("sibling")
+        packets = [
+            {"id": 1, "args": ["register", "--session", "finder", "--name", "finder", "--role", "discover", "--model", DS_FLASH]},
+            {"id": 2, "args": ["register", "--session", "gate", "--name", "gate", "--role", "gate", "--model", MIMO]},
+            {"id": 3, "args": ["message", "--from", "a1", "--model", DS_FLASH, "--to", "a2", "--kind", "ask", "--data", '{"need":"trace"}']},
+            {"id": 4, "args": ["show", "--engagement", sibling]},
+            {"id": 5, "args": ["inbox", "--agent", "a2"]},
+            {"id": 6, "args": ["lead", "--", "--mode", "rpc", "--no-session", "--no-ui"]},
+        ]
+        result = subprocess.run(
+            [sys.executable, "-m", "praise", "--engagement", eng, "serve"],
+            input="".join(json.dumps(p) + "\n" for p in packets), text=True, capture_output=True,
+            cwd=os.path.dirname(os.path.dirname(__file__)), timeout=15, check=True,
+        )
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([r["id"] for r in replies], [1, 2, 3, 4, 5, 6])
+        self.assertFalse(replies[3]["ok"])
+        self.assertEqual(replies[4]["data"]["messages"][0]["data"], {"need": "trace"})
+        self.assertFalse(replies[5]["ok"])
+        self.assertEqual(runtime.peers(sibling)["agents"], [])
 
 
 class FixValidationTests(RuntimeTestBase):
@@ -790,6 +1231,91 @@ class CLITests(RuntimeTestBase):
 
         shown = self._run_ok(["--engagement", eng, "show", "--candidate", cand_id])
         self.assertEqual(shown["candidate"]["status"], "confirmed")
+        self.assertFalse(shown["candidate"]["report_ready"])
+        self._write_evidence(eng, "review.json", b"independent final review of current proof pair")
+        model = runtime.load_roles()["roles"][runtime.load_roles()["stages"]["review"]]["models"][0]
+        reviewed = self._run_ok(["--engagement", eng, "review", "--candidate", cand_id,
+                                 "--decision", "approved", "--reason", "current evidence", "--model", model,
+                                 "--evidence", "review.json"])
+        self.assertTrue(reviewed["report_ready"])
+
+    def test_cli_dispatch_accepts_keyword_tier_packet_and_attempt(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet = DispatchTests._packet(self, eng, candidate)
+        attempt = DispatchTests._attempt(self, eng, candidate)
+        result = self._run_ok(["--engagement", eng, "dispatch", "--stage", "discover",
+                              "--candidate", candidate, "--tier", "deep", "--reason", "missing branch",
+                              "--packet", packet, "--attempt", str(attempt)])
+        self.assertEqual(result["tier"], "deep")
+        self.assertEqual(result["packet"]["ref"], packet)
+
+    def test_cli_packet_writes_validated_content_addressed_artifact(self):
+        _, eng = self._init_source()
+        candidate = self._new_source_candidate(eng)["id"]
+        packet_ref = DispatchTests._packet(self, eng, candidate)
+        path = os.path.join(eng, "evidence", packet_ref)
+        created = self._run_ok(["--engagement", eng, "packet", "--input", path, "--model", DS_FLASH])
+        self.assertEqual(runtime.artifact(eng, created["ref"])["sha256"], created["sha256"])
+        self.assertLessEqual(created["bytes"], 8192)
+
+    def test_lead_recovery_cannot_use_another_engagement_or_non_primary_attempt(self):
+        _, eng = self._init_source()
+        _, sibling = self._init_source("sibling")
+        model = runtime.load_roles()["lead_model"]
+        lead = runtime.register_agent(sibling, "lead", "Lead", "lead", model)["agent"]
+        self._write_evidence(sibling, "failure.json", b"observed model failure")
+        data = {"status": "unresolved", "worker": "lead", "tier": "normal", "finding_id": None,
+                "execution_failure": "model", "evidence": ["failure.json"]}
+        attempt = runtime.send_message(sibling, lead, model, "@lead", "close", data, evidence=["failure.json"])["seq"]
+        with patch.object(cli.os, "execvp") as execute:
+            self._run_fail(["--engagement", eng, "lead", "--recover", str(attempt)])
+            execute.assert_not_called()
+        lead = runtime.register_agent(eng, "flash-lead", "Lead", "lead", DS_FLASH)["agent"]
+        self._write_evidence(eng, "failure.json", b"Recovery model failure is not a primary Lead failure")
+        attempt = runtime.send_message(eng, lead, DS_FLASH, "@lead", "close", data, evidence=["failure.json"])["seq"]
+        with patch.object(cli.os, "execvp") as execute:
+            self._run_fail(["--engagement", eng, "lead", "--recover", str(attempt)])
+            execute.assert_not_called()
+
+    def test_lead_denies_identity_and_scope_overrides(self):
+        _, eng = self._init_source()
+        for flag in ("--model=x", "--cwd", "--provider=x", "--thinking=low", "-mfoo"):
+            with patch.object(cli.os, "execvp") as execute:
+                self.assertIn("cannot override", self._run_fail(["--engagement", eng, "lead", "--", flag]))
+                execute.assert_not_called()
+
+    def test_lead_refuses_missing_or_unknown_catalog_identity(self):
+        _, eng = self._init_source()
+        for model in (None, "", "unrecognized/model", 123):
+            with self.subTest(model=model):
+                catalog = {**runtime.load_roles(), "lead_model": model}
+                with patch.object(runtime, "load_roles", return_value=catalog), patch.object(cli.os, "execvp") as execute:
+                    self.assertIn("known-family lead model", self._run_fail(["--engagement", eng, "lead"]))
+                    execute.assert_not_called()
+
+    def test_lead_recovery_is_explicit_durable_current_execution_failure(self):
+        _, eng = self._init_source()
+        catalog = runtime.load_roles()
+        model = catalog["lead_model"]
+        lead = runtime.register_agent(eng, "lead", "Lead", "lead", model)["agent"]
+        self._write_evidence(eng, "failure.json", b"observed provider refusal; no finding judgment")
+        data = {"status": "unresolved", "finding_id": None, "worker": "lead", "tier": "normal",
+                "execution_failure": "refusal", "evidence": ["failure.json"]}
+        attempt = runtime.send_message(eng, lead, model, "@lead", "close", data, evidence=["failure.json"])["seq"]
+        with patch.object(cli.os, "execvp") as execute:
+            self.assertEqual(self._run(["--engagement", eng, "lead", "--recover", str(attempt)])[0], 0)
+        self.assertEqual(execute.call_args.args[1][-1], catalog["lead_recovery_model"])
+        self._write_evidence(eng, "failure.json", b"changed")
+        with patch.object(cli.os, "execvp") as execute:
+            self.assertIn("changed", self._run_fail(["--engagement", eng, "lead", "--recover", str(attempt)]))
+            execute.assert_not_called()
+
+    def test_unavailable_native_launcher_remains_failure(self):
+        _, eng = self._init_source()
+        with patch.object(cli.os, "execvp", side_effect=FileNotFoundError("omp unavailable")) as execute:
+            self.assertIn("launcher failed", self._run_fail(["--engagement", eng, "lead"]))
+        self.assertEqual(execute.call_count, 1)
 
     def test_cli_error_is_json_and_nonzero(self):
         message = self._run_fail(["--engagement", os.path.join(self.root, "missing"), "show"])

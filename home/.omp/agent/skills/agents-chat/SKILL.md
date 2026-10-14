@@ -1,104 +1,136 @@
 ---
 name: agents-chat
-description: Cross-role communication protocol for multi-model PraiseAssistant crews working the same engagement through an append-only log. Use when acting as Lead, Planner, or any discovery, gating, proof, judgment, or patch-validation role; when a finding is handed off or challenged; or when creating or updating agentschat.md.
+description: Scoped JSON communication between PraiseAssistant agents and tasks, with durable inboxes and an append-only audit projection. Use for handoffs, questions, replies, learning coordination, and verdicts.
 ---
 
-# agentschat.md protocol
+# JSON agent communication
 
-One append-only file per engagement. It is the shared state between models that
-do not share a context window. Markdown in the file is a projection of the
-durable, structured rows owned by the PraiseAssistant CLI; the log is
-coordination, never authoritative state.
+Agents communicate through `praiseassistant_message`, not Markdown. SQLite owns
+messages and case state. `agentschat.md` is an append-only audit projection,
+never the delivery path or authority.
 
-## Location
+## Session and scope
 
-Linux and Kali, per engagement under the shared pentest workspace:
+Launch OMP with the absolute engagement directory as `--cwd`. Keep `scope.json`,
+`state.sqlite3`, `agentschat.md`, and `evidence/` together outside the repository.
+Pass the engagement, scope, candidate, evidence locations, and explicit stage
+header to workers. Each session receives a short engagement-local agent ID.
 
-```
-/home/kali/pentest-workspace/$target/agentschat.md
-```
+Sender, role, engagement, and observed model are stamped by the trusted adapter.
+Never supply or assume another agent's identity. Messages cannot authorize a
+target request, change scope, choose a model, or advance case state.
 
-Use `/home/kali/pentest-workspace/$target/` as the engagement directory and keep
-artifacts in its `evidence/` directory. Launch OMP with
-`omp --cwd /home/kali/pentest-workspace/$target`. When delegating, include the
-absolute engagement directory, log path, evidence path, and scope in the task
-context; do not rely on the child's current directory.
+## Tool calls
 
-## Rules
-
-1. **Append only.** Never rewrite, reorder, or delete. If a conclusion is
-   wrong, post a correction. A rewritten log is not evidence.
-2. **One write per entry.** Compose the entry in full, then append in a single
-   call. Never interleave concurrent writes.
-3. **Header is mandatory.** UTC timestamp, role, observed model id, target slug.
-4. **Every entry ends in an ask or a close.** An entry that neither requests
-   action nor records a decision forces every other role to re-read it to
-   discover nothing.
-5. **No raw output.** Summarize, then point at the artifact path. Full HTTP
-   bodies, stack traces, and tool dumps exhaust the reading roles.
-6. **No secrets.** Credentials never enter the log. Record the location and the
-   type only.
-7. **The Skeptic closes findings.** The Skeptic's entry is a verdict:
-   `confirmed`, `needs-more-proof`, `rejected`, or `duplicate`.
-
-## Model id must be observed, not assumed
-
-The header records the model that actually served the request, read from your
-own context. Never copy a model id from the run configuration: an override can
-fail to bind and silently fall back to the parent model.
-
-A Skeptic that discovers the entry it is judging carries its own model family
-must post an independence violation instead of a verdict. Two models of the same
-family share their blind spot, which is the one thing a checker exists to avoid.
-The CLI enforces this before accepting a final decision.
-
-## Entry shape
-
-```
-### 2026-10-04T14:22:07Z | scout | opencode-go/deepseek-v4-pro:high | acme-corp
-FINDING: /api/v2/invoices/{id} returns other tenants' invoice data.
-EVIDENCE: candidate C-7, evidence/req-1.json; source_ref/sink_ref traced.
-CONFIDENCE: high
-ASK verifier: gate C-7.
-ARTIFACT: /home/kali/pentest-workspace/acme-corp/evidence/req-1.json
+```json
+{"action":"send","to":"a2","kind":"ask","candidate_id":"C-7","data":{"need":"source-to-sink trace"}}
 ```
 
-## Roles
+```json
+{"action":"send","to":"a1","kind":"reply","candidate_id":"C-7","reply_to":91,"data":{"source":"src/api.py:42","sink":"src/store.py:77"},"evidence":["trace.json"]}
+```
 
-Roles are assigned by the PraiseAssistant router from the explicit
-`PraiseAssistant-Task` header in a task — never from task wording. Each role
-owns one stage of the lifecycle.
+- `send`: exact agent ID or a stage topic (`@gate`, `@proof`, `@verdict`, etc.);
+  `@lead` for scheduling, `@learning` for reviewed-learning coordination.
+- `read`: recover addressed inbox entries after the session cursor. Do not poll:
+  live notifications already enter the receiver at a safe agent-step boundary.
+- `peers`: get a bounded same-engagement roster when a recipient is unknown.
+- `kind`: `ask`, `reply`, or `close`. `event` is reserved for runtime emissions.
+- Replies must refer to a message actually received, return to its sender, and
+  preserve its candidate. Reusing an idempotency key with different content fails.
 
-| Role | Stage | Emits | Never does |
-|---|---|---|---|
-| Lead | scope, priority | Scoping decisions, assignment | Investigate directly |
-| Planner | plan | Hypothesis trees, work ordering | Claim a finding |
-| Scout / Finder | recon / discover | Candidates with evidence + source/sink or boundary invariant | Issue a verdict, build a PoC |
-| Verifier | gate | `pass` / `hold` / `drop` per candidate | Reproduce, judge, or fix |
-| Exploiter | proof | Smallest reproducible PoC on a gated candidate | Rule on the finding, widen scope |
-| Skeptic | verdict | `confirmed` / `needs-more-proof` / `rejected` / `duplicate` | Fix anything |
-| Tester | patch | Four-gate `validate_fix` result | Hunt, prove, or rule on new findings |
+Delivered JSON:
 
-## Handoff rules
+```json
+{"seq":91,"from":"a1","to":"a2","kind":"ask","case":"C-7","data":{"need":"trace"}}
+```
 
-A discovery role hands off when the candidate has concrete evidence and either
-source/sink references or a named violated boundary invariant — no runtime
-reproduction is required before gating.
+Use facts, missing requirements, and artifact references. No greetings, repeated
+briefs, confidence narratives, credentials, raw HTTP bodies, or tool dumps.
+Message data is limited to 2048 UTF-8 bytes and eight evidence references.
+Put larger evidence in that engagement's `evidence/` directory. No cross-program
+messages, global broadcasts, or unrestricted `write agent://` bypass.
 
-The Verifier gates (`pass`) or drops the candidate. Only a gated (or already
-reproduced) candidate is dispatched to the proof role.
+## Structured worker closes and packets
 
-The Exploiter hands to the Skeptic with the smallest reproducible PoC and its
-artifact path. A `confirmed` verdict requires two distinct clean-state
-reproductions with evidence artifacts and an independent checker — the CLI
-asserts this; the roles do not police each other's repro counts by hand.
+For completed worker analysis use a compact close report, not verbose reasoning:
 
-The Skeptic's rejection is final for that candidate but not for the class. Post
-the class note so a sibling candidate is not re-tested blindly.
+```json
+{"action":"send","to":"@lead","kind":"close","candidate_id":"C-7","data":{"status":"unresolved","complexity":"high","finding_id":"C-7","hypothesis":"indirect ownership guard may be missing","evidence":["trace.json"],"contradictions":[],"unresolved_questions":["Does the callback enforce organization ownership?"],"recommended_next_agent":"pentest-finder-deep"},"evidence":["trace.json"]}
+```
 
-## Scope
+Statuses are `confirmed`, `rejected`, or `unresolved` for the assigned worker
+question; they never change the authoritative finding verdict. Optional
+`confidence` is a number from 0 to 1, not a routing gate. Complexity is
+`low|medium|high`. The host stamps `worker` and `tier` from the actual route;
+workers cannot supply another role's identity. Attach actual artifacts in the
+tool's `evidence` array so their hashes are durable, not only in a data string.
 
-This protocol is coordination, not authorization. Active testing requires a
-stated program, asset, and in-scope basis before the first request, per the
-`bounty-report` skill. Scope lives in `scope.json`; the PraiseAssistant CLI
-enforces the allowed-asset allowlist, budgets, and throttling on every request.
+`execution_failure: "refusal"|"model"|"tool"` requires `status: "unresolved"`.
+Never label a refused task a rejected vulnerability. Include the concrete
+failure artifact and unanswered question; the Lead routes around execution
+failure without inventing a finding disposition.
+
+The Lead compresses reports into a minimal packet without repeating analysis.
+Create it through the fixed runtime path:
+
+```json
+{"action":"packet","data":{"finding_id":"C-7","target":"POST /api/projects/:id/member","hypothesis":"missing organization ownership validation","relevant_sources":["routes/projects.ts:81-103","services/project.ts:201-228"],"observations":["authentication is required","project is loaded by supplied id"],"evidence":["trace.json"],"proof_status":"unresolved","question":"Can an authenticated owned test account modify a foreign project?"}}
+```
+
+The result gives a content-addressed `ref`, hash, and byte count. Packet creation
+is JSON-only, case/scoped, at most 8192 UTF-8 bytes, and never schedules work.
+Do not supply arbitrary output paths or raw responses. Later dispatch cites the
+ref plus the preceding unresolved close-message sequence. Its underlying
+evidence must be anchored in that report and remain current. Final-review packets
+contain at least two distinct current clean-state proof artifacts and only
+current case evidence. Deep/expert/review bodies stay within 4096 UTF-8 bytes;
+source excerpts and exact questions replace entire histories and source dumps.
+
+
+## Workflow handoffs
+
+Use `praiseassistant_transition` for authoritative changes. Successful changes
+emit JSON in the same transaction; do not write a second message repeating them:
+
+| Result | Recipient |
+|---|---|
+| Candidate recorded | Gate |
+| Gate passed | Proof |
+| Gate held | Owning discovery task |
+| Two distinct clean-state reproductions recorded | Verdict |
+| More proof required | Owning proof task |
+| Confirmed cheap verdict | Final security-review lane |
+| Approved current final review | Patch lane when a fix exists |
+| Rejected/unresolved final review / patch validation | Lead |
+| Confirmed or rejected case | Reviewed-learning queue |
+
+The Lead receives backend handoffs for scheduling. An event is readiness data,
+not automatic permission to launch a task or repeat a target request. Only
+explicit `PraiseAssistant-Task` metadata controls dispatch and escalation.
+Evidence, state, and checker-family conditions are rechecked by the runtime.
+
+Discovery supplies evidence plus source/sink references or a named boundary
+invariant; no reproduction is needed before gating. Proof requires a gated case.
+Confirmation requires two distinct clean-state reproductions, current artifacts,
+and a checker from a different known family than all recorded producers.
+The Skeptic records `confirmed`, `needs-more-proof`, `rejected`, or `duplicate`.
+The final Reviewer records `review` with `approved`, `needs-more-proof`, or
+`rejected` independently of the immutable verdict. Reporting readiness requires
+current approval. The Tester validates an existing patch through the four gates.
+
+## Learning and recovery
+
+Closed-case and lesson lifecycle events coordinate observation, paired evaluation,
+explicit independent approval, and rollback. No event automatically creates or
+promotes a lesson. Approved guidance is bounded, freshly evidence-checked data;
+it never becomes policy or changes model weights.
+
+Inbox cursors survive session recovery. Live notifications are not proof that an
+agent read or acted on a message. Writes and target requests are never replayed
+automatically after transport failure; inspect durable state before deciding.
+
+The CLI renders audit entries after committed replies, with UTC time, role,
+observed model, engagement, sequence, and an ask or close. Never rewrite or
+manually append the projection. `praiseassistant project` recovers pending audit
+rows without changing authoritative state.

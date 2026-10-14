@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "lead_model": "opencode-go/cat-jam-free:xhigh",
+  "lead_recovery_model": "opencode-go/cat-jam-free:xhigh",
+  "stages": {},
+  "escalations": {},
+  "experts": {},
+  "roles": {
+    "agent": {"models": ["opencode-go/cat-jam-free:xhigh"]},
+    "coordinator": {"models": ["opencode-go/cat-jam-free:xhigh"]}
+  }
+}

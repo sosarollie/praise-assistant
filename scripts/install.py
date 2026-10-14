@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("agents-chat", "bounty-report", "praiseassistant-workflow", "praiseassistant-learning", "patch-validation")
+SKILLS = ("agents-chat",)
 
 
 def digest(data: bytes) -> str:
@@ -90,8 +90,8 @@ def atomic_write(target: Path, data: bytes, mode: int) -> None:
 
 
 def plans(home: Path) -> list[tuple[str, bytes, int]]:
-    importlib.metadata.version("praiseassistant")
-    catalog_bytes = (ROOT / "praiseassistant/roles.json").read_bytes()
+    importlib.metadata.version("praise")
+    catalog_bytes = (ROOT / "praise/roles.json").read_bytes()
     catalog = json.loads(catalog_bytes)
     entries = []
     for folder in (ROOT / "home/.omp/agent/agents", ROOT / "home/.omp/agent/extensions"):
@@ -114,13 +114,13 @@ def plans(home: Path) -> list[tuple[str, bytes, int]]:
     content = config.read_text() if config.exists() else "providers:\n  maxInFlightRequests:\n    openai-codex: 3\n"
     entries.append((".omp/agent/config.yml", model_settings(content, catalog), 0o600))
     executable = str(Path(sys.executable).absolute())
-    launcher = f"#!/bin/sh\nexec {shlex.quote(executable)} -m praiseassistant \"$@\"\n".encode()
-    entries.append((".local/bin/praiseassistant", launcher, 0o700))
+    launcher = f"#!/bin/sh\nexec {shlex.quote(executable)} -m praise \"$@\"\n".encode()
+    entries.append((".local/bin/praise", launcher, 0o700))
     return entries
 
 
 def rollback(home: Path, backup: Path) -> dict:
-    base = home / ".local/state/praiseassistant/install-backups"
+    base = home / ".local/state/praise/install-backups"
     if not backup.resolve().is_relative_to(base.resolve()):
         raise ValueError("Backup must belong to this installation home")
     records = json.loads((backup / "manifest.json").read_text())
@@ -172,7 +172,7 @@ def main() -> None:
         print(json.dumps({"installed": 0, "home": str(home)}))
         return
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup = home / ".local/state/praiseassistant/install-backups" / stamp
+    backup = home / ".local/state/praise/install-backups" / stamp
     backup.mkdir(parents=True, mode=0o700)
     records = []
     for relative, data, mode in updates:

@@ -28,7 +28,7 @@ class InstallTests(unittest.TestCase):
     def test_rollback_restores_old_bytes_and_removes_owned_new_files(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp).resolve()
-            backup = home / '.local/state/praiseassistant/install-backups/test'
+            backup = home / '.local/state/praise/install-backups/test'
             backup.mkdir(parents=True)
             original, installed = b'original\n', b'installed\n'
             atomic_write(home / 'existing', installed, 0o600)
@@ -48,7 +48,7 @@ class InstallTests(unittest.TestCase):
     def test_changed_destination_blocks_entire_rollback(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp).resolve()
-            backup = home / '.local/state/praiseassistant/install-backups/test'
+            backup = home / '.local/state/praise/install-backups/test'
             backup.mkdir(parents=True)
             atomic_write(home / 'existing', b'new-user-work', 0o600)
             atomic_write(backup / 'existing', b'original', 0o600)
