@@ -8,16 +8,45 @@ Praise selects each role's configured provider/model, registers the agent's host
 
 Requires Linux, Python 3.11+, and [OMP](https://github.com/can1357/oh-my-pi) with authenticated providers. The integration is exercised with OMP 18.10.2.
 
+**1. Clone the repository**
+
 ```sh
 git clone https://github.com/sosarollie/praise-assistant.git
 cd praise-assistant
+```
+
+**2. Create and activate a virtual environment**
+
+```sh
 python3 -m venv .venv
 . .venv/bin/activate
+```
+
+**3. Install the package**
+
+```sh
 python -m pip install .
+```
+
+**4. Install the Praise integration**
+
+```sh
 praise install
 ```
 
-Keep this Python environment available: the installed launcher uses it. Add `$HOME/.local/bin` to `PATH` when using the launcher outside the activated environment.
+**5. Start the agentic lead**
+
+```sh
+praise startLeadAgent \
+  --directory "$HOME/pentest-workspace/my-engagement" \
+  --program 'Owned source review' \
+  --basis 'Authorized analysis of this local source' \
+  --asset "$PWD"
+```
+
+Step 5 opens the configured lead chat, which then begins the agentic workflow and delegates to specialists on its own. See [Start an engagement](#start-an-engagement) for the full option set and resuming an existing engagement.
+
+Keep the Python environment from steps 2–3 available: the installed launcher uses it. Add `$HOME/.local/bin` to `PATH` when using the launcher outside the activated environment.
 
 ## Configure providers and models
 
