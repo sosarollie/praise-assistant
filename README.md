@@ -61,34 +61,6 @@ praise init --directory "$ENGAGEMENT" \
   --mode source
 ```
 
-## Cross-Agent Communication
-
-Register participants.
-
-```sh
-praise --engagement "$ENGAGEMENT" register \
-  --session session-a --name worker-a --role lead \
-  --model opencode-go/cat-jam-free:xhigh
-
-praise --engagement "$ENGAGEMENT" register \
-  --session session-b --name coordinator --role coordinator \
-  --model opencode-go/cat-jam-free:xhigh
-```
-
-Send a message.
-
-```sh
-praise --engagement "$ENGAGEMENT" message \
-  --from a1 --model opencode-go/cat-jam-free:xhigh \
-  --to a2 --kind ask --data '{"need":"example"}'
-```
-
-Read messages.
-
-```sh
-praise --engagement "$ENGAGEMENT" inbox --agent a2
-```
-
 ## Provider and Model Configuration
 
 Praise maps roles to
