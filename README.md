@@ -28,7 +28,6 @@ home/.omp/agent/           # Owned OMP roles, extension, skills, rules
 
 - Python 3.11 or newer.
 - OMP installed and authenticated with your providers.
-- Optional: CyberStrikeAI installed separately for security-tool workflows.
 - Recommended OMP version: 18.6.1.
 
 ## Installation
@@ -155,48 +154,42 @@ task:
 You may adjust these manually. Avoid assigning a higher-cost model when a lighter model
 can perform the same communication task.
 
-## Defining Your Own Roles
+## Selecting Models For Existing Roles
 
-To add a role:
+The communication roles are predefined. Users do not implement custom roles. Each role
+has its own model selector, and users choose which model to assign.
 
-1. Add it to `roles.json`:
-
-```json
-"researcher": {
-  "models": ["openai/gpt-4.1"]
-}
-```
-
-2. Register participants with that role:
-
-```sh
-praise --engagement "$ENGAGEMENT" register \
-  --session s3 --name researcher --role researcher \
-  --model openai/gpt-4.1
-```
-
-Current built-in communication role choices for registration are:
+Current roles:
 
 - `lead`
 - `agent`
 - `coordinator`
 
-Add application-specific roles in `roles.json` when needed.
+To change a role model:
 
-## CyberStrikeAI Integration
+1. Update `praise/roles.json`:
 
-Praise and CyberStrikeAI can be used together.
+```json
+"agent": {
+  "models": ["openai/gpt-4.1"]
+}
+```
 
-- Praise handles cross-agent coordination and messaging.
-- CyberStrikeAI provides security-tool execution and provider configuration.
-- Install/build CyberStrikeAI separately.
-- Launch CyberStrikeAI with its own `config.yaml`.
-
-Example:
+2. Re-run the installer:
 
 ```sh
-cyberstrike-ai -config /path/to/CyberStrikeAI/config.yaml
+python scripts/install.py --overwrite
 ```
+
+3. Assign the matching model when registering:
+
+```sh
+praise --engagement "$ENGAGEMENT" register \
+  --session s1 --name worker-a --role agent \
+  --model openai/gpt-4.1
+```
+
+The model selected at registration becomes the observed model for that participant.
 
 ## Commands
 
