@@ -1,6 +1,7 @@
 # Praise
 
 Praise is focused explicitly on use in cybersecurity environments.
+All roles are intended primarily for cybersecurity engagements and environments.
 
 Praise is a lightweight, communication-focused multi-agent coordination layer for OMP.
 ## What Praise Provides
