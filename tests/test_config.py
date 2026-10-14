@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
     def test_default_roles_and_unknown_family_are_supported(self):
         with tempfile.TemporaryDirectory() as temp:
             self.assertEqual(tuple(config.load_roles(temp)["models"]), config.ROLE_NAMES)
-            self.assertEqual(config.dispatch("lead", temp)["model"], "opencode-go/cat-jam-free:xhigh")
+            self.assertEqual(config.dispatch("lead", temp)["model"], "opencode-go/step-5-preview-free:xhigh")
             config.set_role_model("finder", "private-vendor/new-model:custom-effort", temp)
             self.assertEqual(config.dispatch("finder", temp), {"role": "finder", "agent": "finder", "model": "private-vendor/new-model:custom-effort"})
 

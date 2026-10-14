@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "models": {
-    "lead": "opencode-go/cat-jam-free:xhigh",
+    "lead": "opencode-go/step-5-preview-free:xhigh",
     "planner": "opencode-go/step-5-preview-free:high",
     "scout": "opencode-go/step-5-preview-free:high",
     "finder": "opencode-go/deepseek-v4.1-flash:high",

@@ -68,7 +68,7 @@ Selections are saved atomically in `~/.omp/agent/praise.json`. Dispatch and lead
 
 | Role | Specialization | Provider | Recommended model |
 |---|---|---|---|
-| `lead` | Coordinate scope, specialist assignments, progress, and final synthesis | `opencode-go` | `cat-jam-free:xhigh` |
+| `lead` | Coordinate scope, specialist assignments, progress, and final synthesis | `opencode-go` | `step-5-preview-free:xhigh` |
 | `planner` | Plan the authorized work, dependencies, and bounded task slices | `opencode-go` | `step-5-preview-free:high` |
 | `scout` | Map supplied surfaces and locate relevant code or artifacts | `opencode-go` | `step-5-preview-free:high` |
 | `finder` | Investigate security issues and trace source evidence | `opencode-go` | `deepseek-v4.1-flash:high` |
@@ -78,7 +78,11 @@ Selections are saved atomically in `~/.omp/agent/praise.json`. Dispatch and lead
 | `reviewer` | Independently review conclusions and supporting artifacts | `openai-codex` | `gpt-daybreak-blue-latest:high` |
 | `tester` | Validate proposed changes against the assigned requirements | `opencode-go` | `glm-5.3-flash:high` |
 
-These are the defaults for one reason: **the two evidence-producing roles (`finder`, `exploiter`) use one model family, and every checking role must come from a different family** so a reviewer is never grading its own class of reasoning. `deepseek-v4.1-flash` carries production because it traced the most distinct defects in comparison testing; `step-5-preview-free:high` carries checking and planning because it is also free and supports effort control; `glm-5.3-flash:high` covers second-opinion and change validation.
+These are the defaults for one reason: **the two evidence-producing roles (`finder`, `exploiter`) use one model family, and every checking role must come from a different family** so a reviewer is never grading its own class of reasoning. `deepseek-v4.1-flash` carries production because it traced the most distinct defects in comparison testing; `step-5-preview-free` carries the orchestrator, checking and planning because it is also free and supports effort control; `glm-5.3-flash:high` covers second-opinion and change validation.
+
+The lead runs at `:xhigh` while its specialists run at `:high`. Orchestrating scope, delegation and synthesis is where haste costs the most work, and step-5's effort ceiling is `xhigh`, so the lead uses the deepest available setting instead of a faster peer.
+
+Note that the lead, planner, scout and verifier now share the step-5 family. That is acceptable only because the lead coordinates and never renders a finding verdict — the roles that do judge evidence (`skeptic`, `reviewer`, `tester`) remain in different families from the producers.
 
 Verify a model actually supports thinking before assigning an effort suffix — an unsupported suffix is silently ignored, so a selector like `provider/model:high` on a model with no effort levels costs you nothing and buys you nothing.
 
