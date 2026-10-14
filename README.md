@@ -257,9 +257,12 @@ workers are scheduled, they invoke the communication tools themselves and messag
 delivered automatically into the recipient session at safe execution boundaries or
 through durable inbox recovery.
 
-Praise does not auto-start workers, auto-create tasks, or auto-send messages on its
-own. Scheduling and message content remain agent-controlled to keep coordination explicit
-and safe. Humans usually only initialize the engagement and launch the lead.
+Praise does not auto-start workers or invent messages by itself. Delegation is performed
+through OMP task scheduling: the lead assigns a specialist subagent with a
+PraiseAssistant-Task metadata header, the specialist registers when it starts,
+and communication then happens automatically through Praise messages. Scheduling and
+message content remain agent-controlled to keep coordination explicit and safe.
+Humans usually only initialize the engagement and launch the lead.
 
 ## Commands
 
