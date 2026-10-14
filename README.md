@@ -156,6 +156,17 @@ can perform the same communication task.
 
 ## Selecting Models For Existing Roles
 
+## Roles And Recommended Providers
+
+| Role | Used For | Recommended Provider / Model (this workspace) |
+|---|---|---|
+| `lead` | Top-level scope, scheduling, coordination, and final synthesis | `opencode-go/cat-jam-free:xhigh` |
+| `agent` | General communication participant for task slices and updates | `opencode-go/cat-jam-free:xhigh` |
+| `coordinator` | Cross-agent coordination, roster checks, and status summaries | `opencode-go/cat-jam-free:xhigh` |
+
+These are the fixed roles available in this implementation. Users may change the model
+assigned to any role, but should keep the role definitions themselves unchanged.
+
 The communication roles are predefined. Users do not implement custom roles. Each role
 has its own model selector, and users choose which model to assign.
 
