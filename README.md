@@ -64,7 +64,7 @@ Register participants.
 
 ```sh
 praise --engagement "$ENGAGEMENT" register \
-  --session session-a --name worker-a --role agent \
+  --session session-a --name worker-a --role lead \
   --model opencode-go/cat-jam-free:xhigh
 
 praise --engagement "$ENGAGEMENT" register \
@@ -104,12 +104,14 @@ This is the source of truth for role and model assignment.
   "escalations": {},
   "experts": {},
   "roles": {
-    "agent": {
-      "models": ["opencode-go/cat-jam-free:xhigh"]
-    },
-    "coordinator": {
-      "models": ["opencode-go/cat-jam-free:xhigh"]
-    }
+    "planner": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
+    "scout": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
+    "finder": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
+    "verifier": {"models": ["opencode-go/longcat-2.5-preview-free:high"]},
+    "exploiter": {"models": ["opencode-go/deepseek-v4.1-flash:high"]},
+    "skeptic": {"models": ["opencode-go/glm-5.3-flash:high"], "independent": true},
+    "reviewer": {"models": ["openai-codex/gpt-daybreak-blue-latest:high"], "independent": true},
+    "tester": {"models": ["opencode-go/longcat-2.5-preview-free:high"], "independent": true}
   }
 }
 ```
@@ -147,8 +149,14 @@ After installation, `~/.omp/agent/config.yml` contains generated role overrides:
 ```yaml
 task:
   agentModelOverrides:
-    agent: opencode-go/cat-jam-free:xhigh
-    coordinator: opencode-go/cat-jam-free:xhigh
+    planner: opencode-go/longcat-2.5-preview-free:high
+    scout: opencode-go/longcat-2.5-preview-free:high
+    finder: opencode-go/deepseek-v4.1-flash:high
+    verifier: opencode-go/longcat-2.5-preview-free:high
+    exploiter: opencode-go/deepseek-v4.1-flash:high
+    skeptic: opencode-go/glm-5.3-flash:high
+    reviewer: openai-codex/gpt-daybreak-blue-latest:high
+    tester: opencode-go/longcat-2.5-preview-free:high
 ```
 
 You may adjust these manually. Avoid assigning a higher-cost model when a lighter model
@@ -160,28 +168,66 @@ can perform the same communication task.
 
 | Role | Used For | Recommended Provider / Model (this workspace) |
 |---|---|---|
-| `lead` | Top-level scope, scheduling, coordination, and final synthesis | `opencode-go/cat-jam-free:xhigh` |
-| `agent` | General communication participant for task slices and updates | `opencode-go/cat-jam-free:xhigh` |
-| `coordinator` | Cross-agent coordination, roster checks, and status summaries | `opencode-go/cat-jam-free:xhigh` |
+| `lead` | Top-level scope, scheduling, coordination, synthesis | `opencode-go/cat-jam-free:xhigh` |
+| `planner` | Hypothesis planning | `opencode-go/longcat-2.5-preview-free:high` |
+| `scout` | Surface mapping | `opencode-go/longcat-2.5-preview-free:high` |
+| `finder` | Source paths and invariants | `opencode-go/deepseek-v4.1-flash:high` |
+| `verifier` | Evidence reachability sanity | `opencode-go/longcat-2.5-preview-free:high` |
+| `exploiter` | Controlled reproduction | `opencode-go/deepseek-v4.1-flash:high` |
+| `skeptic` | Independent verdict | `opencode-go/glm-5.3-flash:high` |
+| `reviewer` | Final review | `openai-codex/gpt-daybreak-blue-latest:high` |
+| `tester` | Fix and alternate-path validation | `opencode-go/longcat-2.5-preview-free:high` |
+
+Lead model in pipeline:
+```text
+CatJam Lead
+    |
+    v
+LongCat Planner
+    |
+    v
+LongCat Scout
+    |
+    v
+DeepSeek Finder
+    |
+    v
+LongCat Verifier
+    |
+    v
+DeepSeek Exploiter
+    |
+    v
+GLM Skeptic
+    |
+    v
+Daybreak Review
+    |
+    v
+LongCat Tester
+```
 
 These are the fixed roles available in this implementation. Users may change the model
 assigned to any role, but should keep the role definitions themselves unchanged.
 
-The communication roles are predefined. Users do not implement custom roles. Each role
-has its own model selector, and users choose which model to assign.
-
 Current roles:
 
 - `lead`
-- `agent`
-- `coordinator`
+- `planner`
+- `scout`
+- `finder`
+- `verifier`
+- `exploiter`
+- `skeptic`
+- `reviewer`
+- `tester`
 
 To change a role model:
 
 1. Update `praise/roles.json`:
 
 ```json
-"agent": {
+"planner": {
   "models": ["openai/gpt-4.1"]
 }
 ```
@@ -196,7 +242,7 @@ python scripts/install.py --overwrite
 
 ```sh
 praise --engagement "$ENGAGEMENT" register \
-  --session s1 --name worker-a --role agent \
+  --session s1 --name worker-a --role lead \
   --model openai/gpt-4.1
 ```
 

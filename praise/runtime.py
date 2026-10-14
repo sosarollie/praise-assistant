@@ -1528,7 +1528,7 @@ def register_agent(directory: str, session_id: str, name: str, role: str, model:
     session_id = _identifier(session_id, "session")
     name = _identifier(name, "agent name")
     model = _identifier(model, "observed model")
-    if role not in ("lead", "agent", "coordinator"):
+    if role not in ("lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"):
         raise PraiseError("unknown communication role")
     conn = connect(directory)
     try:

@@ -224,7 +224,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("register", help="Bind a session to a short engagement-local agent id")
     p.add_argument("--session", required=True)
     p.add_argument("--name", required=True)
-    p.add_argument("--role", required=True, choices=["lead", "agent", "coordinator"])
+    p.add_argument("--role", required=True, choices=["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"])
     p.add_argument("--model", required=True)
     p.add_argument("--candidate")
     p.set_defaults(func=_cmd_register)
