@@ -1,5 +1,7 @@
 # Praise
 
+Praise is focused explicitly on use in cybersecurity environments.
+
 Praise is a lightweight, communication-focused multi-agent coordination layer for OMP.
 ## What Praise Provides
 
@@ -273,3 +275,7 @@ python -m unittest tests.test_install
 - Praise messages are coordination data, not authorization.
 - Keep secrets and raw target data out of messages.
 - Do not reuse another engagement's records or accounts.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
