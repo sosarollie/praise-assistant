@@ -1,8 +1,8 @@
 # Praise
 
-Praise coordinates specialized AI agents in **cybersecurity engagements and environments**. A lead delegates bounded tasks to fixed specialist roles, and any specialist can delegate to another when its expertise is needed.
+Praise coordinates specialized AI agents in **cybersecurity engagements and environments**. The main session is the lead: it runs on the model the terminal selected, delegates bounded tasks to fixed specialist roles, and any specialist can delegate to another when its expertise is needed.
 
-Praise selects each role's configured provider/model, registers the agent's host-observed identity, preserves parent–child relationships, and automatically delivers startup, completion, and peer messages inside the engagement. Agents use OMP's native task tool and Praise's communication tools; users configure the models and start the lead.
+Praise selects each specialist role's configured provider/model, registers the agent's host-observed identity, preserves parent–child relationships, and automatically delivers startup, completion, and peer messages inside the engagement. Agents use OMP's native task tool and Praise's communication tools; users configure specialist models and start the main session.
 
 ## Install
 
@@ -34,7 +34,7 @@ python -m pip install .
 praise install
 ```
 
-**5. Start the agentic lead**
+**5. Start the main session**
 
 ```sh
 praise startLeadAgent \
@@ -44,7 +44,7 @@ praise startLeadAgent \
   --asset "$PWD"
 ```
 
-Step 5 opens the configured lead chat, which then begins the agentic workflow and delegates to specialists on its own. See [Start an engagement](#start-an-engagement) for the full option set and resuming an existing engagement.
+Step 5 opens the main session, which begins the agentic workflow and delegates to specialists on its own using the terminal-selected model. See [Start an engagement](#start-an-engagement) for the full option set and resuming an existing engagement.
 
 Keep the Python environment from steps 2–3 available: the installed launcher uses it. Add `$HOME/.local/bin` to `PATH` when using the launcher outside the activated environment.
 
@@ -52,41 +52,33 @@ Keep the Python environment from steps 2–3 available: the installed launcher u
 
 Authenticate the providers you intend to use with `omp login` or their supported API-key environment variables. Use `omp models` to check available model identifiers.
 
-**Choose a provider and model for every role before starting an engagement.** The table below is our workspace recommendation; `getAgents` shows your current selections.
+**Choose a provider and model for every role before starting an engagement.** `getAgents` prints the current selections as a table of role, provider, model, effort and specialization, marking selections that differ from the packaged defaults:
 
 ```sh
 praise getAgents
-praise setAgent --role finder --model openai/gpt-4.1
-praise getAgents
+praise setAgent --role analyst --model opencode-go/deepseek-v4.1-flash:high
+praise getAgents --json
 ```
 
 Selectors use `provider/model[:effort]`. Provider prefixes such as `openai`, `anthropic`, `google`, `opencode-go`, and `openai-codex` refer to OMP's configured providers. Authenticate the matching provider; an OpenAI API-key provider and the Codex login provider are separate choices.
 
-Selections are saved atomically in `~/.omp/agent/praise.json`. Dispatch and lead startup read that same file. Reinstallation preserves selections, and changes apply to newly started agents. Existing sessions keep their bound identity; restart the lead to change its running model. Unavailable selections produce an error rather than a different model being substituted.
+Selections are saved atomically in `~/.omp/agent/praise.json`. Specialist dispatch reads that same file. The main session has no selector: it runs on the terminal-selected model, is registered as the `main` identity label, and is never matched against configuration. Reinstallation preserves schema-4 selections, and changes apply to newly started workers. Existing workers keep their bound identity; start a new worker to use a changed selector. Unavailable selections produce an error rather than a different model being substituted.
 
 ### Fixed roles and workspace recommendations
 
 | Role | Specialization | Provider | Recommended model |
 |---|---|---|---|
-| `lead` | Coordinate scope, specialist assignments, progress, and final synthesis | `opencode-go` | `step-5-preview-free:xhigh` |
-| `planner` | Plan the authorized work, dependencies, and bounded task slices | `opencode-go` | `step-5-preview-free:high` |
-| `scout` | Map supplied surfaces and locate relevant code or artifacts | `opencode-go` | `step-5-preview-free:high` |
-| `finder` | Investigate security issues and trace source evidence | `opencode-go` | `deepseek-v4.1-flash:high` |
-| `verifier` | Check evidence, reachability, and security invariants | `opencode-go` | `step-5-preview-free:high` |
-| `exploiter` | Develop minimal reproductions within explicit authorization | `opencode-go` | `deepseek-v4.1-flash:high` |
-| `skeptic` | Challenge conclusions, assumptions, and alternative explanations | `opencode-go` | `glm-5.3-flash:high` |
-| `reviewer` | Independently review conclusions and supporting artifacts | `openai-codex` | `gpt-daybreak-blue-latest:high` |
-| `tester` | Validate proposed changes against the assigned requirements | `opencode-go` | `glm-5.3-flash:high` |
+| `investigator` | Hard reasoning, adversarial challenge and controlled reproduction | `openai-codex` | `gpt-5.6-sol:xhigh` |
+| `scout` | Broad read-heavy surface and source exploration without verdicts | `opencode-go` | `deepseek-v4.1-flash:high` |
+| `analyst` | Narrow comparison, classification and output reduction without impact claims | `opencode-go` | `deepseek-v4.1-flash:high` |
 
-These are the defaults for one reason: **the two evidence-producing roles (`finder`, `exploiter`) use one model family, and every checking role must come from a different family** so a reviewer is never grading its own class of reasoning. `deepseek-v4.1-flash` carries production because it traced the most distinct defects in comparison testing; `step-5-preview-free` carries the orchestrator, checking and planning because it is also free and supports effort control; `glm-5.3-flash:high` covers second-opinion and change validation.
+The main session should normally run GPT-5.6 Sol and owns authorization, the hypothesis registry and final acceptance. Delegate at most four genuinely different paths in one native task batch. Every investigative assignment states its hypothesis, existing evidence, expected signal and disproof condition.
 
-The lead runs at `:xhigh` while its specialists run at `:high`. Orchestrating scope, delegation and synthesis is where haste costs the most work, and step-5's effort ceiling is `xhigh`, so the lead uses the deepest available setting instead of a faster peer.
+Scout and analyst optimize breadth and throughput. Their candidates are not confirmed findings: a fresh investigator must try to disprove them, and human review remains final. Because scout and analyst share the DeepSeek family, this setup does not claim model-family-independent review.
 
-Note that the lead, planner, scout and verifier now share the step-5 family. That is acceptable only because the lead coordinates and never renders a finding verdict — the roles that do judge evidence (`skeptic`, `reviewer`, `tester`) remain in different families from the producers.
+`xhigh` is the default for the difficult role; use `max` only after a paired comparison shows a quality benefit. Verify a model actually supports the selected effort suffix—an unsupported suffix may be ignored.
 
-Verify a model actually supports thinking before assigning an effort suffix — an unsupported suffix is silently ignored, so a selector like `provider/model:high` on a model with no effort levels costs you nothing and buys you nothing.
-
-Roles are fixed; users select the models assigned to them. Assign different model families when your engagement requires independent review.
+Roles are fixed; users select the models assigned to them. The router has no lexical auto-routing or fallback chain.
 
 ## Start an engagement
 
@@ -100,7 +92,7 @@ praise startLeadAgent \
   --asset "$PWD"
 ```
 
-This initializes the engagement and opens the configured lead chat. Give the lead your objective; it can assign specialists without manual registration or message commands. Specialist definitions include native delegation tools, subject to OMP's depth and concurrency limits. The default depth of two supports a lead delegating to a worker that delegates to another specialist.
+This initializes the engagement and opens the main session on the terminal-selected model. Give it your objective; it can assign specialists without manual registration or message commands. Specialist definitions include native delegation tools, subject to OMP's depth and concurrency limits. The default depth of two supports a lead delegating to a worker that delegates to another specialist.
 
 Resume an existing engagement with:
 
@@ -123,11 +115,12 @@ Each engagement keeps its scope, `state.sqlite3`, append-only `agentschat.md`, a
 |---|---|
 | `praise install` | Install the packaged agent definitions, extension, and coordination skill |
 | `praise setAgent --role ROLE --model SELECTOR` | Persist the model selection for one fixed role |
-| `praise getAgents` | Show configured roles, models, and specializations |
-| `praise getAgents --engagement DIR` | Also show registered participants, parent relationships, and model provenance |
-| `praise startLeadAgent --directory DIR` | Initialize or resume an engagement and start the configured lead |
+| `praise getAgents` | Print the configured roles as a table of role, provider, model, effort, and specialization |
+| `praise getAgents --engagement DIR` | Also print the registered participants with name, role, model, provenance, and parent |
+| `praise getAgents --json` | Emit the same data as the schema-4 JSON object instead of tables |
+| `praise startLeadAgent --directory DIR` | Initialize or resume an engagement and start the main session on the terminal-selected model |
 
-Configured selectors and registered participants are distinct. A manually asserted selector is labeled `asserted`; OMP-derived identity is labeled `host`. A participant record is history, not proof that a worker is currently running.
+Configured selectors and registered participants are distinct. A manually asserted selector is labeled `asserted`; OMP-derived identity is labeled `host`. A participant record is history, not proof that a worker is currently running. Both listings are aligned tables on standard output; `--json` keeps the machine-readable object for scripts and tooling.
 
 ## Upgrade and recovery
 
@@ -138,15 +131,17 @@ praise install --dry-run
 praise install --overwrite
 ```
 
-The installer prints its backup path. It migrates previous role selections, removes obsolete owned integration files, and preserves unrelated OMP settings. Restart OMP after installation; existing sessions retain loaded extensions.
+The installer prints its backup path. Schema-4 reinstalls preserve the selected models byte-for-byte. A schema-3 catalog is replaced with the fixed three-role defaults rather than guessing how eight conflicting role selections should collapse; the original catalog and removed role files remain in the printed rollback backup. Unrelated OMP settings are preserved.
 
-Restore an installation with:
+Runtime schema 4 preserves historical participants, direct messages and reply links. Messages addressed to removed role topics are archived, and removed-role workers cannot resume. Stop running workers before upgrading, restart OMP after installation, and start new workers under the three current roles.
+
+Restore installed files and the previous role catalog with:
 
 ```sh
 praise install --restore-backup /absolute/path/to/printed-backup
 ```
 
-Rollback refuses to erase files changed since installation. Engagement histories are preserved by the transactional schema-3 migration; keep a consistent engagement backup before upgrading. Installation rollback restores deployed files, not an engagement database.
+Rollback refuses to erase files changed since installation. Engagement database migration is transactional but is not reverted by installation rollback; keep a consistent engagement backup before upgrading.
 
 For an isolated OMP agent directory, set `PI_CODING_AGENT_DIR` before installation and use the same value for subsequent Praise and OMP commands. `praise install --home /path/to/test-home` is available for isolated installation checks.
 

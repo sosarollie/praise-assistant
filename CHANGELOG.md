@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Remove `lead` from the configured and delegable roles. The main session is now the lead and runs on the terminal-selected model, registering only as the `main` identity label with no selector, dispatch, or identity check. `startLeadAgent` no longer injects a `--model` and passes native arguments through unchanged; specialist roles keep their configured models and worker identity checks.
+- Replace eight overlapping specialists with `investigator`, `scout` and `analyst`: GPT-5.6 Sol at `xhigh` handles difficult reasoning and controlled reproduction, while DeepSeek V4.1 Flash handles broad exploration and narrow evidence processing.
+- Limit a native delegation wave to four distinct tasks, make the main session own the hypothesis registry and final acceptance, and require hypothesis, evidence, expected-signal and disproof framing.
+- Require fast-role candidates to receive a fresh investigator challenge without claiming model-family-independent review; human review remains final.
+- Migrate role catalogs and engagement history to schema 4. Installation backs up schema-3 catalogs and removed role files, while runtime migration preserves direct history and archives removed role topics.
+- Print `getAgents` as aligned role and participant tables by default—role, provider, model, effort and specialization, with changed roles naming their packaged default—and keep the schema-4 JSON object behind `getAgents --json`.
+
 ## 0.2.0 — 2026-10-14
 
 - Make `praise.json` the persistent source of truth for fixed-role model selections, dispatch, and lead startup; preserve selections on reinstallation.

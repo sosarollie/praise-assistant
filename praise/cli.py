@@ -45,19 +45,56 @@ def _model_description(selector):
     return {"provider": provider, "name": model, "effort": effort or None}
 
 
+def _render_table(header, rows):
+    widths = [max(len(header[index]), *(len(row[index]) for row in rows)) for index in range(len(header))]
+    return ["  ".join(row[index].ljust(widths[index]) for index in range(len(header))).rstrip() for row in (header, *rows)]
+
+
+def _format_agents(display, directory):
+    changed = sum(1 for entry in display["roles"] if entry["model"] != entry["default_model"])
+    lines = [f"Roles ({len(display['roles'])} configured, {changed} changed from the packaged defaults)",
+             "", *["  " + line for line in _render_table(
+                 ["ROLE", "PROVIDER", "MODEL", "EFFORT", "SPECIALIZATION"],
+                 [[entry["role"], entry["model_description"]["provider"], entry["model_description"]["name"],
+                   entry["model_description"]["effort"] or "-",
+                   entry["description"] + (f" (packaged default: {entry['default_model']})"
+                                            if entry["model"] != entry["default_model"] else "")]
+                  for entry in display["roles"]])]]
+    if directory is None:
+        return "\n".join(lines) + "\n"
+    agents = display["participants"]["agents"]
+    lines += ["", f"Participants ({len(agents)} registered in {directory})"]
+    if not agents:
+        return "\n".join([*lines, "  none registered"]) + "\n"
+    lines += ["", *["  " + line for line in _render_table(
+        ["ID", "NAME", "ROLE", "MODEL", "PROVENANCE", "PARENT"],
+        [[entry["id"], entry["name"], entry["role"], entry["model"], entry["model_source"], entry.get("parent") or "-"]
+         for entry in agents])],
+        "", "  host = model observed from the running agent; asserted = selector supplied at registration."]
+    if display["participants"]["more"]:
+        lines.append("  Showing the 32 most recent participants.")
+    return "\n".join(lines) + "\n"
+
+
 def _cmd_get_agents(args):
     catalog = config.load_roles()
     defaults = config.default_roles()["models"]
-    result = {"schema_version": 3, "roles": [
+    result = {"schema_version": config.CONFIG_SCHEMA_VERSION, "roles": [
         {"role": role, "model": catalog["models"][role], "model_description": _model_description(catalog["models"][role]),
          "default_model": defaults[role], "description": config.ROLE_DESCRIPTIONS[role]}
         for role in config.ROLE_NAMES
     ]}
+    directory = None
     # A configured selector is not a participant's observed host model.
     if args.engagement is not None:
-        runtime.load_scope(_engagement_dir(args))
-        result["participants"] = runtime.peers(_engagement_dir(args))
-    return result
+        directory = _engagement_dir(args)
+        runtime.load_scope(directory)
+        result["participants"] = runtime.peers(directory)
+    if args.json:
+        return result
+    sys.stdout.write(_format_agents(result, directory))
+    sys.stdout.flush()
+    return None
 
 
 def _cmd_start_lead_agent(args):
@@ -65,16 +102,9 @@ def _cmd_start_lead_agent(args):
     passthrough = list(args.native_args)
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
-    for arg in passthrough:
-        key = arg.split("=", 1)[0]
-        if key in ("--model", "--provider", "--cwd", "--thinking", "--profile") or key.startswith("--thinking-") or (
-            arg.startswith("-m") and not arg.startswith("--")
-        ):
-            raise PraiseError("lead native arguments cannot override model, provider, cwd, thinking, or profile")
     extension = config.agent_dir() / "extensions/praise-router.js"
     if not extension.is_file():
         raise PraiseError("installed Praise extension not found; run praise install first")
-    model = config.dispatch("lead")["model"]
     if (Path(directory) / "scope.json").exists():
         runtime.load_scope(directory)
     else:
@@ -83,11 +113,11 @@ def _cmd_start_lead_agent(args):
         runtime.init_engagement(directory, program=args.program, basis=args.basis, assets=args.asset,
                                 mode=args.mode or "source", methods=args.method, max_requests=args.max_requests,
                                 interval_seconds=args.interval)
-    argv = ["omp", "--cwd", directory, "--model", model, "-e", str(extension), *passthrough]
+    argv = ["omp", "--cwd", directory, "-e", str(extension), *passthrough]
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:
-        raise PraiseError(f"native lead launcher failed: {exc}") from exc
+        raise PraiseError(f"native main launcher failed: {exc}") from exc
 
 
 def _cmd_dispatch(args):
@@ -144,8 +174,9 @@ def _build_parser():
     p = sub.add_parser("getAgents", help="List configured roles; participants only with --engagement")
     # Permit the public documented form `getAgents --engagement DIR` as well.
     p.add_argument("--engagement", default=argparse.SUPPRESS)
+    p.add_argument("--json", action="store_true", help="Emit the machine-readable schema instead of the tables")
     p.set_defaults(func=_cmd_get_agents)
-    p = sub.add_parser("startLeadAgent", help="Initialize or resume an engagement and start its configured native lead")
+    p = sub.add_parser("startLeadAgent", help="Initialize or resume an engagement and start the main session on the terminal-selected model")
     p.add_argument("--directory", required=True)
     p.add_argument("--program")
     p.add_argument("--basis")
@@ -161,7 +192,7 @@ def _build_parser():
     p = sub.add_parser("register")
     p.add_argument("--session", required=True)
     p.add_argument("--name", required=True)
-    p.add_argument("--role", choices=config.ROLE_NAMES, required=True)
+    p.add_argument("--role", choices=(*config.ROLE_NAMES, config.MAIN_ROLE), required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--parent")
     p.add_argument("--observed", action="store_true")

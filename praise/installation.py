@@ -16,15 +16,29 @@ from . import config
 from .config import atomic_write
 from .errors import PraiseError
 
-LEGACY_ROLES = tuple(f"pentest-{role}{suffix}" for role in config.ROLE_NAMES[1:] for suffix in ("", "-deep", "-expert", "-expert-max")) + ("security-reviewer",)
-OWNED_OVERRIDES = frozenset(config.ROLE_NAMES + LEGACY_ROLES)
-OBSOLETE = ("crew.json", "agents/agent.md", "extensions/crew-router.js", "skills/agents-chat/SKILL.md") + tuple(f"agents/{name}.md" for name in LEGACY_ROLES) + tuple(
-    f"skills/{name}/SKILL.md" for name in ("bounty-report", "patch-validation", "praiseassistant-workflow", "praiseassistant-learning")
+OLD_CANONICAL_ROLES = config.REMOVED_ROLE_NAMES
+OLD_PREFIXED_ROLES = tuple(
+    f"pentest-{role}{suffix}"
+    for role in (*config.REMOVED_ROLE_NAMES, "scout")
+    for suffix in ("", "-deep", "-expert", "-expert-max")
+)
+LEGACY_ROLES = OLD_PREFIXED_ROLES + ("security-reviewer",)
+OWNED_OVERRIDES = frozenset((*config.ROLE_NAMES, *OLD_CANONICAL_ROLES, *LEGACY_ROLES))
+OBSOLETE = (
+    "crew.json", "agents/agent.md", "agents/lead.md", "extensions/crew-router.js",
+    "skills/agents-chat/SKILL.md",
+) + tuple(f"agents/{name}.md" for name in (*OLD_CANONICAL_ROLES, *LEGACY_ROLES)) + tuple(
+    f"skills/{name}/SKILL.md"
+    for name in ("bounty-report", "patch-validation", "praiseassistant-workflow", "praiseassistant-learning")
 )
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _read_schema_version(path: Path) -> int | None:
+    return json.loads(path.read_text(encoding="utf-8")).get("schema_version")
 
 
 def safe(root: Path, relative: str) -> Path:
@@ -126,15 +140,23 @@ def plans(home=None) -> list[tuple[Path, bytes | None, int]]:
     for relative, data in packaged.items():
         entries.append((safe(directory, relative), data, 0o600))
     role_path = safe(directory, "praise.json")
-    catalog = config._read_roles(directory)
-    # Reinstall preserves the new source of truth. Initial migration also retains
-    # the effective native task overrides previously selected by the operator.
+    catalog = config._read_roles(directory, migrate=True)
+    # Reinstallation preserves schema-4 selections byte-for-byte. Schema 3 is
+    # replaced with the fixed three-role defaults; the install transaction
+    # retains the original file in its rollback backup.
     existing = role_path.exists()
+    preserve_role_data = (
+        existing and _read_schema_version(role_path) == config.CONFIG_SCHEMA_VERSION
+    )
     yaml = safe(directory, "config.yml")
     if yaml.exists():
-        cleaned = model_settings(yaml.read_bytes().decode("utf-8"), None if existing else catalog["models"])
+        cleaned = model_settings(
+            yaml.read_bytes().decode("utf-8"),
+            None if existing else catalog["models"],
+        )
         entries.append((yaml, cleaned, stat.S_IMODE(yaml.stat().st_mode)))
-    entries.append((role_path, role_path.read_bytes() if existing else config.role_bytes(catalog), 0o600))
+    role_data = role_path.read_bytes() if preserve_role_data else config.role_bytes(catalog)
+    entries.append((role_path, role_data, 0o600))
     for relative in OBSOLETE:
         target = safe(directory, relative)
         if target not in {row[0] for row in entries} and target.exists():

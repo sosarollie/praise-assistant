@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 
 from . import policy
-from .config import ROLE_NAMES
+from .config import MAIN_ROLE, REMOVED_ROLE_NAMES, ROLE_NAMES
 from .errors import PraiseError
 
 try:
@@ -29,11 +29,13 @@ __all__ = ["init_engagement", "load_scope", "connect", "artifact", "register_age
 MAX_MESSAGE_BYTES = 2048
 MAX_ENVELOPE_BYTES = 4096
 MAX_INBOX_BYTES = 8192
-MESSAGE_TOPICS = frozenset(f"@{role}" for role in ROLE_NAMES)
+RUNTIME_SCHEMA_VERSION = 4
+MESSAGE_TOPICS = frozenset(f"@{role}" for role in (*ROLE_NAMES, MAIN_ROLE))
 _LEGACY_ROLES = dict(zip(
     ("plan", "recon", "discover", "gate", "proof", "verdict", "review", "patch"),
     ("planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"),
 ))
+_REMOVED_TOPICS = tuple(f"@{role}" for role in REMOVED_ROLE_NAMES)
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS participants (
@@ -91,14 +93,14 @@ def _tx(conn: sqlite3.Connection):
 def _init_schema(conn: sqlite3.Connection) -> None:
     exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
     version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if exists else None
-    if version and version[0] == "3":
+    if version and version[0] == str(RUNTIME_SCHEMA_VERSION):
         return
     with _tx(conn):
         conn.execute(_SCHEMA[0])
         version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        if version and version[0] == "3":
+        if version and version[0] == str(RUNTIME_SCHEMA_VERSION):
             return
-        if version and version[0] not in ("1", "2"):
+        if version and version[0] not in ("1", "2", "3"):
             raise PraiseError(f"unsupported engagement schema version: {version[0]}")
         for statement in _SCHEMA[1:]:
             conn.execute(statement)
@@ -128,13 +130,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                     (row["seq"], row["role"], "@archive", kind, _json(data), row["evidence_json"],
                      row["role"], row["model"], row["created_at"]),
                 )
-        for old, new in _LEGACY_ROLES.items():
-            conn.execute("UPDATE participants SET role=? WHERE role=?", (new, old))
-            conn.execute("UPDATE messages SET role=? WHERE role=?", (new, old))
-            conn.execute("UPDATE messages SET recipient=? WHERE recipient=?", (f"@{new}", f"@{old}"))
-        # Old runtime events and learning messages cannot trigger new delegation.
-        conn.execute("UPDATE messages SET archived=1 WHERE kind='event' OR recipient IN ('@learning','@archive')")
-        conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version','3')")
+        if not version or version[0] in ("1", "2"):
+            for old, new in _LEGACY_ROLES.items():
+                conn.execute("UPDATE participants SET role=? WHERE role=?", (new, old))
+                conn.execute("UPDATE messages SET role=? WHERE role=?", (new, old))
+                conn.execute("UPDATE messages SET recipient=? WHERE recipient=?", (f"@{new}", f"@{old}"))
+        marks = ",".join("?" for _ in _REMOVED_TOPICS)
+        conn.execute(
+            f"UPDATE messages SET archived=1 WHERE kind='event' "
+            f"OR recipient IN ('@learning','@archive'{',' if marks else ''}{marks})",
+            _REMOVED_TOPICS,
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key,value) VALUES ('schema_version',?)",
+            (str(RUNTIME_SCHEMA_VERSION),),
+        )
 
 
 def connect(directory) -> sqlite3.Connection:
@@ -223,7 +233,7 @@ def _participant(conn, agent):
     if not isinstance(agent, str) or not re.fullmatch(r"a[0-9a-f]{1,16}", agent):
         raise PraiseError("unknown agent in this engagement")
     row = conn.execute("SELECT * FROM participants WHERE agent_id=?", (agent,)).fetchone()
-    if row is None or row["role"] not in ROLE_NAMES:
+    if row is None or (row["role"] not in ROLE_NAMES and row["role"] != MAIN_ROLE):
         raise PraiseError("unknown agent in this engagement")
     return row
 
@@ -242,8 +252,8 @@ def register_agent(directory, session_id, name, role, model, *, parent=None, obs
     session_id = _identifier(session_id, "session")
     name = _identifier(name, "agent name")
     model = _identifier(model, "model")
-    if role not in ROLE_NAMES or type(observed) is not bool:
-        raise PraiseError("registration requires a canonical role and boolean observed flag")
+    if (role not in ROLE_NAMES and role != MAIN_ROLE) or type(observed) is not bool:
+        raise PraiseError("registration requires a canonical role (or the main identity label) and boolean observed flag")
     source = "host" if observed else "asserted"
     conn = connect(directory)
     try:
@@ -388,8 +398,9 @@ def inbox(directory, agent, after=0, limit=32) -> dict:
 def peers(directory) -> dict:
     conn = connect(directory)
     try:
-        marks = ",".join("?" for _ in ROLE_NAMES)
-        rows = conn.execute(f"SELECT * FROM participants WHERE role IN ({marks}) ORDER BY seq DESC LIMIT 33", ROLE_NAMES).fetchall()
+        roles = (*ROLE_NAMES, MAIN_ROLE)
+        marks = ",".join("?" for _ in roles)
+        rows = conn.execute(f"SELECT * FROM participants WHERE role IN ({marks}) ORDER BY seq DESC LIMIT 33", roles).fetchall()
         return {"agents": [_participant_info(row, roster=True) for row in reversed(rows[:32])], "more": len(rows) > 32}
     finally:
         conn.close()

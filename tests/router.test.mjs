@@ -13,7 +13,7 @@ import { acquireJsonClient } from "../praise/integration/extensions/json-client.
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const run = promisify(execFile);
-const models = { lead: "fixture/lead:high", finder: "fixture/finder:high", verifier: "fixture/verifier:high", scout: "fixture/scout:high" };
+const models = { main: "fixture/main:high", investigator: "fixture/investigator:high", scout: "fixture/scout:high", analyst: "fixture/analyst:high" };
 let serial = 0;
 
 function piFixture(entries = []) {
@@ -32,10 +32,10 @@ function piFixture(entries = []) {
   };
 }
 
-function context(pi, directory, { role = "lead", model = models[role], parent, session, id } = {}) {
+function context(pi, directory, { role = "main", model = models[role], parent, session, id } = {}) {
   const n = ++serial;
   return { cwd: directory, model: { provider: model.split("/")[0], id: model.split("/")[1].replace(/:high$/, "") },
-    agent: { kind: role === "lead" ? "main" : "sub", name: role, id: id || `Host${n}`, ...(parent ? { parentId: parent } : {}) },
+    agent: { kind: role === "main" ? "main" : "sub", name: role, id: id || `Host${n}`, ...(parent ? { parentId: parent } : {}) },
     sessionManager: { getSessionId: () => session || `session-${n}`, getEntries: () => pi.entries } };
 }
 
@@ -61,7 +61,9 @@ async function fixture(t) {
   const python = async (code, ...args) => JSON.parse((await run("python3", ["-c", code, ...args], { cwd: repository, env })).stdout);
   await python("import json,sys; from praise.runtime import init_engagement; print(json.dumps(init_engagement(sys.argv[1],program='local fixture',basis='owned offline regression',assets=[sys.argv[2]],mode='source')))", directory, root);
   for (const [role, model] of Object.entries(models)) {
-    await run("python3", ["-m", "praise", "setAgent", "--role", role, "--model", model], { cwd: repository, env });
+    if (role !== "main") {
+      await run("python3", ["-m", "praise", "setAgent", "--role", role, "--model", model], { cwd: repository, env });
+    }
   }
   const processes = [], sessions = [];
   const options = { command: "python3", prefix: ["-m", "praise"], cwd: repository, env,
@@ -108,27 +110,27 @@ test("global installation leaves ordinary unscoped OMP sessions unchanged", asyn
   assert.equal(await pi.handlers.get("before_agent_start")({ prompt: "ordinary coding", systemPrompt: ["host policy"] }, ctx), undefined);
   assert.equal(await pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "ordinary", input: { agent: "task", task: "ordinary work" } }, ctx), undefined);
   assert.equal(await pi.handlers.get("before_subagent_spawn")({ agent: "task", invocationKind: "task", patterns: ["host/default"] }, ctx), undefined);
-  const blocked = await pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "specialist", input: { agent: "finder", task: "scoped work" } }, ctx);
+  const blocked = await pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "specialist", input: { agent: "investigator", task: "scoped work" } }, ctx);
   assert.equal(blocked.block, true);
   assert.match(blocked.reason, /initialized engagement/);
   await pi.handlers.get("session_shutdown")();
 });
 
 test("all canonical specialists expose native delegation and communication tools", () => {
-  const roles = ["lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester"];
+  const roles = ["investigator", "scout", "analyst"];
   for (const role of roles) {
     const text = fs.readFileSync(new URL(`../praise/integration/agents/${role}.md`, import.meta.url), "utf8");
     assert.match(text, new RegExp(`name: ${role}\\n`));
     assert.match(text, /tools: .*task.*praise_message.*praise_state/);
-    assert.match(text, /authorization/);
+    assert.match(text, /uthoriz|scope/);
     assert.doesNotMatch(text, /self.learning|PraiseAssistant-Task|candidate_id/);
   }
 });
 
 test("registration and context use official host identity and only communication tools", async (t) => {
   const f = await fixture(t);
-  assert.equal(f.identity.role, "lead");
-  assert.equal(f.identity.model, "fixture/lead");
+  assert.equal(f.identity.role, "main");
+  assert.equal(f.identity.model, "fixture/main");
   assert.equal(f.identity.model_source, "host");
   assert.deepEqual([...f.lead.pi.tools.keys()], ["praise_message", "praise_state"]);
   const context = await f.lead.start();
@@ -140,11 +142,11 @@ test("registration and context use official host identity and only communication
 
 test("configured task routing needs no user header and pushes startup plus owned replies", async (t) => {
   const f = await fixture(t);
-  const child = await routedChild(f, f.lead, "finder");
+  const child = await routedChild(f, f.lead, "investigator");
   const header = parseTaskHeader(child.item.task);
-  assert.deepEqual(header, { role: "finder", engagement_dir: f.directory, parent: f.identity.agent });
+  assert.deepEqual(header, { role: "investigator", engagement_dir: f.directory, parent: f.identity.agent });
   assert.equal(child.identity.parent, f.identity.agent);
-  assert.equal(child.identity.model, "fixture/finder");
+  assert.equal(child.identity.model, "fixture/investigator");
   await notification(f.lead.pi, (m) => m.data.event === "agent.started" && m.from === child.identity.agent);
   const pushed = notification(child.pi, (m) => m.kind === "ask");
   const ask = await f.lead.invoke("praise_message", { action: "send", to: child.identity.agent, kind: "ask", data: { need: "source reference" } });
@@ -157,28 +159,28 @@ test("configured task routing needs no user header and pushes startup plus owned
   const delivered = await reply;
   assert.equal(delivered.from, child.identity.agent);
   const roster = await f.lead.invoke("praise_message", { action: "peers" });
-  assert.equal(roster.details.data.agents.find((a) => a.id === delivered.from).model, "fixture/finder");
+  assert.equal(roster.details.data.agents.find((a) => a.id === delivered.from).model, "fixture/investigator");
   assert.equal(f.lead.pi.deliveries.at(-1).options.deliverAs, "aside");
   assert.equal(f.processes.length, 1);
 });
 
-test("nested finder to verifier retains immediate parent lineage and exact model", async (t) => {
+test("nested investigator to analyst retains immediate parent lineage and exact model", async (t) => {
   const f = await fixture(t);
-  const finder = await routedChild(f, f.lead, "finder");
-  const verifier = await routedChild(f, finder, "verifier", "Check supplied source reachability");
-  assert.equal(verifier.identity.parent, finder.identity.agent);
-  assert.equal(verifier.identity.model, "fixture/verifier");
-  const started = await notification(finder.pi, (m) => m.data.event === "agent.started" && m.from === verifier.identity.agent);
-  assert.equal(started.to, finder.identity.agent);
+  const investigator = await routedChild(f, f.lead, "investigator");
+  const analyst = await routedChild(f, investigator, "analyst", "Compare supplied source evidence");
+  assert.equal(analyst.identity.parent, investigator.identity.agent);
+  assert.equal(analyst.identity.model, "fixture/analyst");
+  const started = await notification(investigator.pi, (m) => m.data.event === "agent.started" && m.from === analyst.identity.agent);
+  assert.equal(started.to, investigator.identity.agent);
   assert.equal(f.processes.length, 1);
 });
 
 test("a mismatched observed child identity blocks registration without fallback", async (t) => {
   const f = await fixture(t);
   const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "mismatch",
-    input: { agent: "finder", task: "offline source question" } }, f.lead.ctx);
-  await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: ["wrong/other"] }, f.lead.ctx);
-  const child = f.open({ role: "finder", model: "wrong/model:high", parent: f.lead.ctx.agent.id });
+    input: { agent: "investigator", task: "offline source question" } }, f.lead.ctx);
+  await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "investigator", invocationKind: "task", patterns: ["wrong/other"] }, f.lead.ctx);
+  const child = f.open({ role: "investigator", model: "wrong/model:high", parent: f.lead.ctx.agent.id });
   await assert.rejects(child.start(revised.input.task), /observed worker model differs/);
   const peers = await f.lead.invoke("praise_message", { action: "peers" });
   assert.equal(JSON.stringify(peers.details.data).includes("wrong/model"), false);
@@ -186,7 +188,7 @@ test("a mismatched observed child identity blocks registration without fallback"
 
 test("host model substitution after startup cannot send a message or call a provider", async (t) => {
   const f = await fixture(t);
-  const child = await routedChild(f, f.lead, "finder");
+  const child = await routedChild(f, f.lead, "investigator");
   child.ctx.model = { provider: "fixture", id: "alternate" };
   assert.throws(() => child.pi.handlers.get("before_provider_request")({}, child.ctx), /model substitution/);
   const result = await child.invoke("praise_message", { action: "send", to: f.identity.agent, kind: "reply", data: { answer: "not authorized" } });
@@ -197,41 +199,58 @@ test("host model substitution after startup cannot send a message or call a prov
 test("batch failure never partially authorizes a valid first item", async (t) => {
   const f = await fixture(t);
   const response = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "bad-batch",
-    input: { context: "offline", tasks: [{ agent: "finder", task: "valid source task" }, { agent: "obsolete-proof", task: "invalid role" }] } }, f.lead.ctx);
+    input: { context: "offline", tasks: [{ agent: "investigator", task: "valid source task" }, { agent: "obsolete-proof", task: "invalid role" }] } }, f.lead.ctx);
   assert.equal(response.block, true);
-  const spawnResult = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
+  const spawnResult = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "investigator", invocationKind: "task", patterns: [] }, f.lead.ctx);
   assert.equal(spawnResult.block, true);
-  const forged = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
-  await assert.rejects(forged.start(`Praise-Task: ${JSON.stringify({ role: "finder", engagement_dir: f.directory, parent: f.identity.agent })}\nvalid source task`), /host-authorized/);
+  const forged = f.open({ role: "investigator", parent: f.lead.ctx.agent.id });
+  await assert.rejects(forged.start(`Praise-Task: ${JSON.stringify({ role: "investigator", engagement_dir: f.directory, parent: f.identity.agent })}\nvalid source task`), /host-authorized/);
+});
+
+test("one native task wave is limited to four distinct work items", async (t) => {
+  const f = await fixture(t);
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    agent: "analyst",
+    task: `Compare evidence slice ${index}`,
+  }));
+  const response = await f.lead.pi.handlers.get("tool_call")({
+    toolName: "task", toolCallId: "oversized-wave", input: { context: "offline", tasks },
+  }, f.lead.ctx);
+  assert.equal(response.block, true);
+  assert.match(response.reason, /one to four/);
+  const spawnResult = await f.lead.pi.handlers.get("before_subagent_spawn")({
+    agent: "analyst", invocationKind: "task", patterns: [],
+  }, f.lead.ctx);
+  assert.equal(spawnResult.block, true);
 });
 
 test("concurrent same-role native spawns reserve distinct routes", async (t) => {
   const f = await fixture(t);
   const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "same-role",
-    input: { context: "offline", tasks: [{ agent: "finder", task: "first scoped question" }, { agent: "finder", task: "second scoped question" }] } }, f.lead.ctx);
+    input: { context: "offline", tasks: [{ agent: "investigator", task: "first scoped question" }, { agent: "investigator", task: "second scoped question" }] } }, f.lead.ctx);
   assert.equal(revised.block, undefined);
   const dispatches = await Promise.all([0, 1].map((i) => f.lead.pi.handlers.get("before_subagent_spawn")({
-    agent: "finder", invocationKind: "task", patterns: [], spawnKey: `same-role:${i}` }, f.lead.ctx)));
-  assert.deepEqual(dispatches.map((d) => d.model), [models.finder, models.finder]);
+    agent: "investigator", invocationKind: "task", patterns: [], spawnKey: `same-role:${i}` }, f.lead.ctx)));
+  assert.deepEqual(dispatches.map((d) => d.model), [models.investigator, models.investigator]);
   for (const item of revised.input.tasks) {
-    const child = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
+    const child = f.open({ role: "investigator", parent: f.lead.ctx.agent.id });
     await child.start(item.task);
   }
-  const denied = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
+  const denied = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "investigator", invocationKind: "task", patterns: [] }, f.lead.ctx);
   assert.equal(denied.block, true);
 });
 
 test("same-role child startup can arrive out of the task input order", async (t) => {
   const f = await fixture(t);
   const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "reordered",
-    input: { context: "offline", tasks: [{ agent: "finder", task: "first question" }, { agent: "finder", task: "second question" }] } }, f.lead.ctx);
+    input: { context: "offline", tasks: [{ agent: "investigator", task: "first question" }, { agent: "investigator", task: "second question" }] } }, f.lead.ctx);
   const spawnChild = () => f.lead.pi.handlers.get("before_subagent_spawn")({
-    agent: "finder", invocationKind: "task", patterns: [] }, f.lead.ctx);
-  const second = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
-  assert.equal((await spawnChild()).model, models.finder);
+    agent: "investigator", invocationKind: "task", patterns: [] }, f.lead.ctx);
+  const second = f.open({ role: "investigator", parent: f.lead.ctx.agent.id });
+  assert.equal((await spawnChild()).model, models.investigator);
   const secondIdentity = JSON.parse((await second.start(revised.input.tasks[1].task)).message.content);
-  const first = f.open({ role: "finder", parent: f.lead.ctx.agent.id });
-  assert.equal((await spawnChild()).model, models.finder);
+  const first = f.open({ role: "investigator", parent: f.lead.ctx.agent.id });
+  assert.equal((await spawnChild()).model, models.investigator);
   const firstIdentity = JSON.parse((await first.start(revised.input.tasks[0].task)).message.content);
   assert.notEqual(firstIdentity.agent, secondIdentity.agent);
   assert.equal(firstIdentity.parent, f.identity.agent);
@@ -241,17 +260,17 @@ test("same-role child startup can arrive out of the task input order", async (t)
 
 test("persistent role changes are consulted for every new native task", async (t) => {
   const f = await fixture(t);
-  await run("python3", ["-m", "praise", "setAgent", "--role", "finder", "--model", "fixture/new-finder:high"], { cwd: repository, env: f.env });
+  await run("python3", ["-m", "praise", "setAgent", "--role", "investigator", "--model", "fixture/new-investigator:high"], { cwd: repository, env: f.env });
   const revised = await f.lead.pi.handlers.get("tool_call")({ toolName: "task", toolCallId: "changed",
-    input: { agent: "finder", task: "new configured route" } }, f.lead.ctx);
+    input: { agent: "investigator", task: "new configured route" } }, f.lead.ctx);
   assert.equal(revised.block, undefined);
-  const response = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "finder", invocationKind: "task", patterns: [models.finder] }, f.lead.ctx);
-  assert.equal(response.model, "fixture/new-finder:high");
+  const response = await f.lead.pi.handlers.get("before_subagent_spawn")({ agent: "investigator", invocationKind: "task", patterns: [models.investigator] }, f.lead.ctx);
+  assert.equal(response.model, "fixture/new-investigator:high");
 });
 
 test("legacy host cursors recover a worker only after durable delivery and preserve its lineage", async (t) => {
   const f = await fixture(t);
-  const child = await routedChild(f, f.lead, "finder");
+  const child = await routedChild(f, f.lead, "investigator");
   await f.lead.invoke("praise_message", { action: "send", to: child.identity.agent, kind: "ask", data: { need: "legacy" } });
   const first = await notification(child.pi, (m) => m.data.need === "legacy");
   const registration = child.pi.entries.find((e) => e.customType === "praise-registration");
@@ -259,7 +278,7 @@ test("legacy host cursors recover a worker only after durable delivery and prese
     data: { engagement: f.directory, agent: child.identity.agent, after: 0, cursor: first.seq, seqs: [first.seq] } };
   const delivered = { type: "custom_message", customType: "praiseassistant-scope",
     content: JSON.stringify({ agent: child.identity.agent, messages: [first] }) };
-  const settings = { role: "finder", parent: f.lead.ctx.agent.id, session: child.ctx.sessionManager.getSessionId(), id: child.ctx.agent.id };
+  const settings = { role: "investigator", parent: f.lead.ctx.agent.id, session: child.ctx.sessionManager.getSessionId(), id: child.ctx.agent.id };
   await child.shutdown();
   const restored = f.open({ ...settings, entries: [registration, delivered, checkpoint] });
   const startup = await restored.start("resume without any manual metadata");
@@ -291,7 +310,7 @@ test("same-process pool isolates engagement subscribers and refuses rebinding", 
 
 test("automatic completion is bounded, skips continuations and never duplicates after wake", async (t) => {
   const f = await fixture(t);
-  const child = await routedChild(f, f.lead, "finder");
+  const child = await routedChild(f, f.lead, "investigator");
   const end = child.pi.handlers.get("agent_end");
   await end({ willContinue: true, messages: [] }, child.ctx);
   assert.equal(child.pi.entries.filter((e) => e.customType === "praise-completion").length, 0);
@@ -315,7 +334,7 @@ test("automatic completion is bounded, skips continuations and never duplicates 
 
 test("an interim close to a parent does not suppress automatic task completion", async (t) => {
   const f = await fixture(t);
-  const child = await routedChild(f, f.lead, "finder");
+  const child = await routedChild(f, f.lead, "investigator");
   const note = await child.invoke("praise_message", { action: "send", to: f.identity.agent,
     kind: "close", data: { note: "local evidence ready; task is still running" } });
   assert.equal(note.details.ok, true);

@@ -1,4 +1,4 @@
-"""Public configuration, lead launch and resident protocol behavior."""
+"""Public configuration, main launch and resident protocol behavior."""
 from __future__ import annotations
 
 import io
@@ -51,32 +51,44 @@ class CLITests(unittest.TestCase):
         return [json.loads(line) for line in stdout.getvalue().splitlines()]
 
     def test_model_change_is_visible_without_an_engagement(self):
-        code, out, err = self.call(["setAgent", "--role", "finder", "--model", "vendor/new-model:high"])
+        code, out, err = self.call(["setAgent", "--role", "analyst", "--model", "vendor/new-model:high"])
         self.assertEqual((code, err), (0, ""))
         code, out, err = self.call(["getAgents"])
         self.assertEqual((code, err), (0, ""))
+        self.assertIn("new-model", out)
+        self.assertIn("1 changed from the packaged defaults", out)
+        self.assertEqual(out.count("(packaged default:"), 1)
+        self.assertNotIn("Participants", out)
+        code, out, err = self.call(["getAgents", "--json"])
+        self.assertEqual((code, err), (0, ""))
         displayed = json.loads(out)
+        self.assertEqual(displayed["schema_version"], 4)
         roles = {row["role"]: row for row in displayed["roles"]}
         self.assertEqual(set(roles), set(config.ROLE_NAMES))
-        self.assertEqual(roles["finder"]["model"], "vendor/new-model:high")
-        self.assertEqual(config.dispatch("finder")["model"], "vendor/new-model:high")
+        self.assertEqual(roles["analyst"]["model"], "vendor/new-model:high")
+        self.assertEqual(config.dispatch("analyst")["model"], "vendor/new-model:high")
         self.assertNotIn("participants", displayed)
 
     def test_get_agents_distinguishes_asserted_from_host_identity(self):
         self.initialize()
-        asserted = runtime.register_agent(self.eng, "manual", "manual", "finder", "vendor/assertion")
-        observed = runtime.register_agent(self.eng, "host", "host", "finder", "vendor/actual", observed=True)
-        code, out, err = self.call(["getAgents", "--engagement", str(self.eng)])
+        asserted = runtime.register_agent(self.eng, "manual", "manual", "investigator", "vendor/assertion")
+        observed = runtime.register_agent(self.eng, "host", "host", "investigator", "vendor/actual", observed=True)
+        code, out, err = self.call(["getAgents", "--engagement", str(self.eng), "--json"])
         self.assertEqual((code, err), (0, ""))
         participants = {row["id"]: row for row in json.loads(out)["participants"]["agents"]}
         self.assertEqual(participants[asserted["agent"]]["model_source"], "asserted")
         self.assertEqual(participants[observed["agent"]]["model_source"], "host")
         self.assertEqual(participants[observed["agent"]]["model"], "vendor/actual")
+        human = self.call(["getAgents", "--engagement", str(self.eng)])
+        self.assertEqual(human[0], 0)
+        self.assertIn("Participants (2 registered in", human[1])
+        self.assertIn("vendor/assertion", human[1])
+        self.assertIn("vendor/actual", human[1])
 
     def test_removed_commands_and_invalid_model_choices_fail_without_writes(self):
         cases = (["init"], ["lead"], ["setrole"], ["candidate"],
-                 ["setAgent", "--role", "finder-deep", "--model", "vendor/model"],
-                 ["setAgent", "--role", "finder", "--model", "invalid"])
+                 ["setAgent", "--role", "finder", "--model", "vendor/model"],
+                 ["setAgent", "--role", "investigator", "--model", "invalid"])
         for argv in cases:
             with self.subTest(argv=argv):
                 code, out, err = self.call(argv)
@@ -95,9 +107,8 @@ class CLITests(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(json.loads(out), {"role": "scout", "agent": "scout", "model": "vendor/current:high"})
 
-    def test_new_lead_initializes_and_launches_the_exact_selected_directory(self):
+    def test_new_main_initializes_and_launches_without_a_lead_selector(self):
         extension = self.launcher()
-        config.set_role_model("lead", "vendor/operator:xhigh")
         with patch("praise.cli.os.execvp", side_effect=OSError("stopped at process boundary")) as execute:
             code, out, err = self.call([
                 "startLeadAgent", "--directory", str(self.eng), "--program", "owned fixture",
@@ -105,34 +116,36 @@ class CLITests(unittest.TestCase):
                 "--no-extensions", "--no-session", "-p", "hello",
             ])
         self.assertEqual(code, 1)
-        self.assertIn("native lead launcher failed", json.loads(err)["error"])
+        self.assertIn("native main launcher failed", json.loads(err)["error"])
         self.assertEqual(runtime.load_scope(self.eng)["source_roots"], [str(self.source)])
         self.assertEqual(execute.call_args.args, ("omp", [
-            "omp", "--cwd", str(self.eng), "--model", "vendor/operator:xhigh", "-e", str(extension),
+            "omp", "--cwd", str(self.eng), "-e", str(extension),
             "--no-extensions", "--no-session", "-p", "hello",
         ]))
 
-    def test_resume_preserves_scope_and_does_not_substitute_unavailable_models(self):
-        self.launcher()
+    def test_resume_preserves_scope_and_uses_the_terminal_model(self):
+        extension = self.launcher()
         self.initialize()
         scope = (self.eng / "scope.json").read_bytes()
-        config.set_role_model("lead", "unavailable-vendor/unknown-model:xhigh")
         with patch("praise.cli.os.execvp", side_effect=OSError("unavailable host execution")) as execute:
             code, out, err = self.call(["startLeadAgent", "--directory", str(self.eng), "--", "--print", "hello"])
         self.assertEqual(code, 1)
         self.assertEqual((self.eng / "scope.json").read_bytes(), scope)
-        self.assertEqual(execute.call_args.args[1][4], "unavailable-vendor/unknown-model:xhigh")
+        self.assertEqual(execute.call_args.args[1], [
+            "omp", "--cwd", str(self.eng), "-e", str(extension), "--print", "hello",
+        ])
         self.assertEqual(execute.call_count, 1)
 
-    def test_native_model_and_scope_overrides_fail_before_initialization(self):
+    def test_native_arguments_are_passed_through_without_override_guards(self):
         self.launcher()
-        for arguments in (["--cwd=/other"], ["--model", "vendor/other"], ["-mother"],
-                          ["--provider=other"], ["--thinking=low"], ["--profile", "other"]):
+        self.initialize()
+        for arguments in (["--model", "vendor/other"], ["-mother"], ["--thinking=low"], ["--profile", "other"]):
             with self.subTest(arguments=arguments):
-                code, out, err = self.call(["startLeadAgent", "--directory", str(self.eng), "--", *arguments])
-                self.assertNotEqual(code, 0)
-                self.assertIn("cannot override", json.loads(err)["error"])
-                self.assertFalse(self.eng.exists())
+                with patch("praise.cli.os.execvp", side_effect=OSError("stopped at process boundary")) as execute:
+                    code, out, err = self.call(["startLeadAgent", "--directory", str(self.eng), "--", *arguments])
+                self.assertEqual(code, 1)
+                self.assertIn("native main launcher failed", json.loads(err)["error"])
+                self.assertEqual(execute.call_args.args[1][-len(arguments):], arguments)
 
     def test_missing_scope_or_integration_does_not_create_an_engagement(self):
         code, out, err = self.call(["startLeadAgent", "--directory", str(self.eng)])
@@ -155,8 +168,8 @@ class CLITests(unittest.TestCase):
 
     def test_resident_registration_commits_parent_notification_and_provenance(self):
         self.initialize()
-        parent = runtime.register_agent(self.eng, "lead", "lead", "lead", "vendor/lead", observed=True)["agent"]
-        replies = self.resident([["register", "--session", "child", "--name", "worker", "--role", "finder",
+        parent = runtime.register_agent(self.eng, "main", "main", "main", "vendor/main", observed=True)["agent"]
+        replies = self.resident([["register", "--session", "child", "--name", "worker", "--role", "investigator",
                                   "--model", "vendor/model", "--parent", parent, "--observed"]])
         self.assertTrue(replies[0]["ok"])
         child = replies[0]["data"]["agent"]
@@ -167,7 +180,7 @@ class CLITests(unittest.TestCase):
 
     def test_uncertain_committed_resident_write_is_not_replayed(self):
         self.initialize()
-        sender = runtime.register_agent(self.eng, "sender", "sender", "finder", "vendor/model")["agent"]
+        sender = runtime.register_agent(self.eng, "sender", "sender", "investigator", "vendor/model")["agent"]
         send = runtime.send_message
 
         def commit_then_fail(*args, **kwargs):

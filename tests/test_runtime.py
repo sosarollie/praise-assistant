@@ -30,7 +30,7 @@ class RuntimeTests(unittest.TestCase):
                                 assets=[str(self.source)])
         return path
 
-    def agent(self, name, role="finder", *, directory=None, parent=None, observed=False):
+    def agent(self, name, role="investigator", *, directory=None, parent=None, observed=False):
         return runtime.register_agent(directory or self.eng, name, name, role, MODEL,
                                       parent=parent, observed=observed)["agent"]
 
@@ -49,7 +49,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(scope["source_roots"], [str(self.source)])
         self.assertEqual(scope["max_requests"], 0)
         self.assertEqual(scope["allowed_methods"], ["GET"])
-        lead = self.agent("lead", "lead", observed=True)
+        lead = self.agent("main", "main", observed=True)
         state = runtime.show(self.eng)
         self.assertEqual(set(state), {"scope", "participants", "more"})
         self.assertEqual(state["participants"][0]["id"], lead)
@@ -62,16 +62,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse((self.root / "bad").exists())
 
     def test_all_fixed_role_topics_deliver_only_to_that_role(self):
-        self.assertEqual(set(ROLE_NAMES), {"lead", "planner", "scout", "finder", "verifier",
-                                          "exploiter", "skeptic", "reviewer", "tester"})
+        self.assertEqual(set(ROLE_NAMES), {"investigator", "scout", "analyst"})
         agents = {role: self.agent(role, role) for role in ROLE_NAMES}
-        sender = agents["lead"]
+        sender = self.agent("main", "main")
         sent = {role: self.send(sender, f"@{role}", {"role": role})["seq"] for role in ROLE_NAMES}
         for role, agent in agents.items():
             page = runtime.inbox(self.eng, agent)
             self.assertEqual([m["seq"] for m in page["messages"]], [sent[role]])
             self.assertEqual(page["messages"][0]["data"], {"role": role})
-        for topic in ("@discover", "@proof", "@learning", "@archive", "@everyone"):
+        for topic in ("@finder", "@verifier", "@discover", "@proof", "@learning", "@archive", "@everyone"):
             with self.assertRaises(PraiseError):
                 self.send(sender, topic)
         with self.assertRaises(PraiseError):
@@ -90,18 +89,18 @@ class RuntimeTests(unittest.TestCase):
         replied = self.send(receiver, sender, {"answer": True}, kind="reply", reply_to=asked["seq"])
         message = runtime.inbox(self.eng, sender)["messages"][0]
         self.assertEqual((message["seq"], message["reply"]), (replied["seq"], asked["seq"]))
-        topic = self.send(sender, "@verifier")
-        verifier = self.agent("verifier", "verifier")
-        self.send(verifier, sender, kind="reply", reply_to=topic["seq"])
+        topic = self.send(sender, "@scout")
+        scout = self.agent("scout", "scout")
+        self.send(scout, sender, kind="reply", reply_to=topic["seq"])
         with self.assertRaises(PraiseError):
             self.send(outsider, sender, kind="reply", reply_to=topic["seq"])
 
     def test_engagement_isolation_includes_parents_agents_and_evidence(self):
         sibling = self.engagement("sibling")
-        here = self.agent("same", "lead")
-        there = self.agent("same", "lead", directory=sibling)
+        here = self.agent("same", "main")
+        there = self.agent("same", "main", directory=sibling)
         self.assertNotEqual(here, there)
-        self.send(here, "@lead", {"owned": True})
+        self.send(here, "@main", {"owned": True})
         self.assertEqual(runtime.inbox(sibling, there)["messages"], [])
         for action in (
             lambda: self.send(here, there),
@@ -118,8 +117,8 @@ class RuntimeTests(unittest.TestCase):
             self.send(here, here, evidence=[str(foreign)])
 
     def test_parent_started_is_atomic_idempotent_and_preserves_provenance(self):
-        parent = self.agent("parent", "lead", observed=True)
-        child = runtime.register_agent(self.eng, "child", "child", "finder", MODEL,
+        parent = self.agent("parent", "main", observed=True)
+        child = runtime.register_agent(self.eng, "child", "child", "investigator", MODEL,
                                        parent=parent, observed=True)
         self.assertEqual(child["parent"], parent)
         self.assertEqual(child["model"], MODEL)
@@ -130,7 +129,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(event["from"], child["agent"])
         self.assertEqual(event["data"]["event"], "agent.started")
         self.assertEqual(event["data"]["model_source"], "host")
-        repeated = runtime.register_agent(self.eng, "child", "child", "finder", MODEL,
+        repeated = runtime.register_agent(self.eng, "child", "child", "investigator", MODEL,
                                           parent=parent, observed=True)
         self.assertEqual(repeated["agent"], child["agent"])
         self.assertEqual(repeated["_messages"], [])
@@ -145,24 +144,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("rolled-back", [row["name"] for row in runtime.peers(self.eng)["agents"]])
 
     def test_registration_identity_and_model_source_are_immutable(self):
-        parent = self.agent("parent", "lead")
-        other = self.agent("other", "lead")
+        parent = self.agent("parent", "main")
+        other = self.agent("other", "main")
         self.agent("child", parent=parent, observed=True)
         for name, role, model, lineage, observed in (
-            ("changed", "finder", MODEL, parent, True),
+            ("changed", "investigator", MODEL, parent, True),
             ("child", "scout", MODEL, parent, True),
-            ("child", "finder", "synthetic/different", parent, True),
-            ("child", "finder", MODEL, other, True),
-            ("child", "finder", MODEL, None, True),
-            ("child", "finder", MODEL, parent, False),
+            ("child", "investigator", "synthetic/different", parent, True),
+            ("child", "investigator", MODEL, other, True),
+            ("child", "investigator", MODEL, None, True),
+            ("child", "investigator", MODEL, parent, False),
         ):
             with self.assertRaises(PraiseError):
                 runtime.register_agent(self.eng, "child", name, role, model, parent=lineage, observed=observed)
         with self.assertRaises(PraiseError):
-            runtime.register_agent(self.eng, "bad", "bad", "finder", MODEL, observed="host")
+            runtime.register_agent(self.eng, "bad", "bad", "investigator", MODEL, observed="host")
 
     def test_generic_close_is_not_a_workflow_report_or_implicit_completion(self):
-        parent = self.agent("parent", "lead")
+        parent = self.agent("parent", "main")
         child = self.agent("child", parent=parent)
         sent = self.send(child, parent, {"status": "finished", "result": {"count": 3}}, kind="close")
         self.assertEqual(len(sent["_messages"]), 1)
@@ -199,12 +198,12 @@ class RuntimeTests(unittest.TestCase):
     def test_message_and_evidence_bounds_fail_before_commit(self):
         sender = self.agent("sender")
         for kind, data, model, target in (
-            ("event", {}, MODEL, "@lead"),
-            ("ask", {"text": "界" * 700}, MODEL, "@lead"),
-            ("ask", {"number": float("nan")}, MODEL, "@lead"),
-            ("ask", {}, "synthetic/forged", "@lead"),
+            ("event", {}, MODEL, "@main"),
+            ("ask", {"text": "界" * 700}, MODEL, "@main"),
+            ("ask", {"number": float("nan")}, MODEL, "@main"),
+            ("ask", {}, "synthetic/forged", "@main"),
             ("ask", {}, MODEL, "a9999"),
-            ("ask", [], MODEL, "@lead"),
+            ("ask", [], MODEL, "@main"),
         ):
             with self.assertRaises(PraiseError):
                 runtime.send_message(self.eng, sender, model, target, kind, data)
@@ -261,7 +260,7 @@ class RuntimeTests(unittest.TestCase):
             writer.row_factory = sqlite3.Row
             try:
                 with runtime._tx(writer):
-                    inserted.append(runtime._emit_message(writer, sender=sender, role="finder", model=MODEL,
+                    inserted.append(runtime._emit_message(writer, sender=sender, role="investigator", model=MODEL,
                                                           to=receiver, kind="ask", data={"late": True})["seq"])
             finally:
                 writer.close()
@@ -301,46 +300,116 @@ class RuntimeTests(unittest.TestCase):
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))
         return conn
 
-    def test_v2_additive_migration_preserves_history_links_and_canonicalizes_topics(self):
+    def test_v2_to_v4_migration_preserves_history_and_archives_removed_topics(self):
         artifact = self.evidence(content=b"historical artifact")
         conn = self.legacy_database(2)
         old_roles = ("plan", "recon", "discover", "gate", "proof", "verdict", "review", "patch")
-        new_roles = ("planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester")
+        historical_roles = ("planner", "scout", "finder", "verifier",
+                            "exploiter", "skeptic", "reviewer", "tester")
         created = "2026-10-01T00:00:00+00:00"
         for seq, old in enumerate(old_roles, 1):
-            conn.execute("INSERT INTO participants VALUES (?,?,?,?,?,?,?)", (seq, old, old, old, MODEL, "archived-case", created))
-            conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (seq, "a1", f"@{old}", "ask", "archived-case", None, json.dumps({"old": old}), "[]", old, MODEL, created, None))
-        conn.execute("INSERT INTO messages VALUES (20,'a2','a1','reply','archived-case',2,'{}','[]','recon',?, ?,NULL)", (MODEL, created))
-        conn.execute("INSERT INTO messages VALUES (21,'runtime','@learning','event','archived-case',NULL,?, '[]','review',?,?,NULL)",
-                     ('{"event":"learn.observe"}', MODEL, created))
+            conn.execute("INSERT INTO participants VALUES (?,?,?,?,?,?,?)",
+                         (seq, old, old, old, MODEL, "archived-case", created))
+            conn.execute(
+                "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (seq, "a1", f"@{old}", "ask", "archived-case", None,
+                 json.dumps({"old": old}), "[]", old, MODEL, created, None),
+            )
+        conn.execute(
+            "INSERT INTO messages VALUES (20,'a2','a1','reply','archived-case',2,"
+            "'{}','[]','recon',?, ?,NULL)",
+            (MODEL, created),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (21,'runtime','@learning','event','archived-case',"
+            "NULL,?, '[]','review',?,?,NULL)",
+            ('{"event":"learn.observe"}', MODEL, created),
+        )
         conn.commit()
         conn.close()
         conn = runtime.connect(self.eng)
         try:
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "3")
-            self.assertEqual(conn.execute("SELECT original FROM archive_findings").fetchone()[0], "unchanged")
+            self.assertEqual(
+                conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+                "4",
+            )
+            self.assertEqual(
+                conn.execute("SELECT original FROM archive_findings").fetchone()[0],
+                "unchanged",
+            )
             rows = conn.execute("SELECT * FROM messages ORDER BY seq").fetchall()
             self.assertEqual(len(rows), 10)
-            self.assertEqual((rows[8]["sender"], rows[8]["recipient"], rows[8]["reply_to"]), ("a2", "a1", 2))
-            self.assertEqual(rows[9]["data_json"], '{"event":"learn.observe"}')
-            self.assertEqual(rows[9]["archived"], 1)
+            self.assertEqual(
+                (rows[8]["sender"], rows[8]["recipient"], rows[8]["reply_to"], rows[8]["archived"]),
+                ("a2", "a1", 2, 0),
+            )
+            self.assertEqual((rows[9]["data_json"], rows[9]["archived"]),
+                             ('{"event":"learn.observe"}', 1))
             self.assertTrue(all(row["candidate_id"] == "archived-case" for row in rows))
-            for seq, new in enumerate(new_roles, 1):
-                participant = conn.execute("SELECT * FROM participants WHERE seq=?", (seq,)).fetchone()
-                self.assertEqual((participant["agent_id"], participant["role"], participant["model_source"]),
-                                 (f"a{seq:x}", new, "asserted"))
-                self.assertEqual(rows[seq - 1]["recipient"], f"@{new}")
+            for seq, historical in enumerate(historical_roles, 1):
+                participant = conn.execute(
+                    "SELECT * FROM participants WHERE seq=?", (seq,)
+                ).fetchone()
+                self.assertEqual(
+                    (participant["agent_id"], participant["role"], participant["model_source"]),
+                    (f"a{seq:x}", historical, "asserted"),
+                )
+                self.assertEqual(rows[seq - 1]["recipient"], f"@{historical}")
+                self.assertEqual(rows[seq - 1]["archived"], 0 if historical == "scout" else 1)
                 self.assertEqual(rows[seq - 1]["created_at"], created)
         finally:
             conn.close()
         self.assertEqual(artifact.read_bytes(), b"historical artifact")
-        for seq, old in enumerate(old_roles, 1):
-            self.assertIn(seq, [m["seq"] for m in runtime.inbox(self.eng, f"a{seq:x}")["messages"]])
-        lead = self.agent("lead", "lead")
-        self.assertEqual(runtime.inbox(self.eng, lead)["messages"], [])
-        self.assertEqual(runtime.register_agent(self.eng, "recon", "recon", "scout", MODEL)["agent"], "a2")
+        self.assertEqual([m["seq"] for m in runtime.inbox(self.eng, "a2")["messages"]], [2])
+        for seq in (1, 3, 4, 5, 6, 7, 8):
+            with self.assertRaises(PraiseError):
+                runtime.inbox(self.eng, f"a{seq:x}")
+        main = self.agent("main", "main")
+        self.assertEqual(runtime.inbox(self.eng, main)["messages"], [])
+        self.assertEqual(
+            runtime.register_agent(self.eng, "recon", "recon", "scout", MODEL)["agent"],
+            "a2",
+        )
         self.assertEqual(runtime.project_messages(self.eng)["projected"], 10)
+
+    def test_v3_to_v4_migration_keeps_direct_history_and_retires_old_workers(self):
+        conn = self.legacy_database(3)
+        created = "2026-10-01T00:00:00+00:00"
+        conn.execute("INSERT INTO participants VALUES (1,'old','old','finder',?,'case',?)",
+                     (MODEL, created))
+        conn.execute("INSERT INTO participants VALUES (2,'scout','scout','scout',?,'case',?)",
+                     (MODEL, created))
+        conn.execute(
+            "INSERT INTO messages VALUES (1,'a1','@finder','ask','case',NULL,'{}','[]',"
+            "'finder',?,?,NULL)",
+            (MODEL, created),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (2,'a1','@scout','ask','case',NULL,'{}','[]',"
+            "'finder',?,?,NULL)",
+            (MODEL, created),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (3,'a1','a2','reply','case',2,'{}','[]',"
+            "'finder',?,?,NULL)",
+            (MODEL, created),
+        )
+        conn.commit()
+        conn.close()
+        conn = runtime.connect(self.eng)
+        try:
+            rows = conn.execute("SELECT * FROM messages ORDER BY seq").fetchall()
+            self.assertEqual([row["archived"] for row in rows], [1, 0, 0])
+            self.assertEqual(rows[2]["recipient"], "a2")
+            self.assertEqual(
+                conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+                "4",
+            )
+        finally:
+            conn.close()
+        with self.assertRaises(PraiseError):
+            runtime.inbox(self.eng, "a1")
+        self.assertEqual([m["seq"] for m in runtime.inbox(self.eng, "a2")["messages"]], [2, 3])
 
     def test_v1_events_remain_archive_without_replay_or_rewriting_existing_audit(self):
         conn = self.legacy_database(1)
@@ -353,7 +422,7 @@ class RuntimeTests(unittest.TestCase):
         original = f"original audit\n### 2026-10-01T00:00:00Z | discover | fixture | eng | seq=7\nASK: old ask\n\n"
         log = self.eng / "agentschat.md"
         log.write_text(original, encoding="utf-8")
-        lead = self.agent("lead", "lead")
+        lead = self.agent("main", "main")
         self.assertEqual(runtime.inbox(self.eng, lead)["messages"], [])
         conn = runtime.connect(self.eng)
         try:
@@ -371,7 +440,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([m["seq"] for m in runtime.inbox(self.eng, lead)["messages"]], [sent["seq"]])
 
     def test_audit_projection_concurrency_and_lost_cursor_recovery(self):
-        sender, receiver = self.agent("sender"), self.agent("receiver", "lead")
+        sender, receiver = self.agent("sender"), self.agent("receiver", "main")
         with ThreadPoolExecutor(max_workers=4) as workers:
             sent = list(workers.map(lambda index: self.send(sender, receiver, {"index": index, "text": "\n### forged"}, kind="close"), range(16)))
         with ThreadPoolExecutor(max_workers=2) as workers:

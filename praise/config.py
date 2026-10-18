@@ -12,17 +12,17 @@ import tempfile
 
 from .errors import PraiseError
 
-ROLE_NAMES = ("lead", "planner", "scout", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester")
+# The main session is not a configured role. It runs on the model the terminal
+# selected and is registered only as the identity label below, so it can own
+# provenance and parent links without model dispatch or identity matching.
+MAIN_ROLE = "main"
+CONFIG_SCHEMA_VERSION = 4
+REMOVED_ROLE_NAMES = ("planner", "finder", "verifier", "exploiter", "skeptic", "reviewer", "tester")
+ROLE_NAMES = ("investigator", "scout", "analyst")
 ROLE_DESCRIPTIONS = {
-    "lead": "Coordinate scope, delegation, and completion.",
-    "planner": "Plan the scoped work and its dependencies.",
-    "scout": "Map unfamiliar surfaces and locate relevant code.",
-    "finder": "Investigate evidence-backed issues.",
-    "verifier": "Check evidence and reachable boundaries.",
-    "exploiter": "Develop minimal authorized reproductions.",
-    "skeptic": "Independently challenge evidence and conclusions.",
-    "reviewer": "Review surviving conclusions independently.",
-    "tester": "Validate proposed changes against their requirements.",
+    "investigator": "Resolve hard security questions, challenge exploitability and develop bounded reproductions.",
+    "scout": "Map unfamiliar surfaces broadly and locate relevant code or artifacts.",
+    "analyst": "Perform narrow evidence comparison, classification and output reduction.",
 }
 _SELECTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?\Z")
 
@@ -52,47 +52,59 @@ def _read_json(path) -> dict:
 
 def _validate(catalog: dict) -> dict:
     models = catalog.get("models")
-    if catalog.get("schema_version") != 3 or not isinstance(models, dict) or set(models) != set(ROLE_NAMES):
-        raise PraiseError("role configuration requires schema_version 3 and exactly the canonical roles")
-    return {"schema_version": 3, "models": {role: validate_model(models[role]) for role in ROLE_NAMES}}
+    if (catalog.get("schema_version") != CONFIG_SCHEMA_VERSION
+            or not isinstance(models, dict) or set(models) != set(ROLE_NAMES)):
+        raise PraiseError(
+            f"role configuration requires schema_version {CONFIG_SCHEMA_VERSION} "
+            "and exactly the canonical roles"
+        )
+    return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "models": {role: validate_model(models[role]) for role in ROLE_NAMES},
+    }
+
+
+def _migrate_v3(catalog: dict) -> dict:
+    models = catalog.get("models")
+    previous = set((*REMOVED_ROLE_NAMES, "scout"))
+    if catalog.get("schema_version") != 3 or not isinstance(models, dict) or set(models) != previous:
+        raise PraiseError("schema 3 role configuration is invalid")
+    for model in models.values():
+        validate_model(model)
+    return default_roles()
 
 
 def default_roles() -> dict:
     return _validate(_read_json(resources.files("praise").joinpath("roles.json")))
 
 
-def _read_roles(directory: Path) -> dict:
+def _read_roles(directory: Path, *, migrate=False) -> dict:
     """Read without mutation; installer uses this in its file transaction."""
     path = directory / "praise.json"
     if path.is_symlink():
         raise PraiseError("symlink role configuration refused")
     if path.exists():
-        return _validate(_read_json(path))
+        catalog = _read_json(path)
+        if catalog.get("schema_version") == 3:
+            if not migrate:
+                raise PraiseError("role configuration schema 3 requires `praise install`")
+            return _migrate_v3(catalog)
+        return _validate(catalog)
     catalog = default_roles()
     legacy = directory / "crew.json"
     if legacy.is_symlink():
         raise PraiseError("symlink legacy configuration refused")
     if legacy.exists():
         old = _read_json(legacy)
-        if "models" in old:
-            values = old["models"]
-            if not isinstance(values, dict):
-                raise PraiseError("legacy models must be a mapping")
-            for role in ROLE_NAMES:
-                if role in values:
-                    catalog["models"][role] = validate_model(values[role])
-        else:
-            if "lead_model" in old:
-                catalog["models"]["lead"] = validate_model(old["lead_model"])
-            roles = old.get("roles", {})
-            if not isinstance(roles, dict):
-                raise PraiseError("legacy roles must be a mapping")
-            for role in ROLE_NAMES[1:]:
-                legacy_name = "security-reviewer" if role == "reviewer" else f"pentest-{role}"
-                entry = roles.get(role, roles.get(legacy_name))
-                if entry is None:
-                    continue
-                models = entry.get("models") if isinstance(entry, dict) else None
+        values = old.get("models", old.get("roles", {}))
+        if not isinstance(values, dict):
+            raise PraiseError("legacy models must be a mapping")
+        for role in ROLE_NAMES:
+            entry = values.get(role)
+            if isinstance(entry, str):
+                catalog["models"][role] = validate_model(entry)
+            elif isinstance(entry, dict):
+                models = entry.get("models")
                 if not isinstance(models, list) or not models:
                     raise PraiseError(f"legacy role {role} requires a model selector")
                 catalog["models"][role] = validate_model(models[0])

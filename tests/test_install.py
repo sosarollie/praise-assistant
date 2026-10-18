@@ -56,7 +56,7 @@ class InstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, packaged_resources():
             home = Path(temp)
             installation.install(home)
-            config.set_role_model('finder', 'custom/new-model:xhigh', home)
+            config.set_role_model('investigator', 'custom/new-model:xhigh', home)
             directory = config.agent_dir(home)
             roles = (directory / 'praise.json').read_bytes()
             yaml = directory / 'config.yml'
@@ -66,7 +66,36 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(result['installed'], 0)
             self.assertEqual((directory / 'praise.json').read_bytes(), roles)
             self.assertEqual(yaml.read_bytes(), original)
-            self.assertEqual(config.dispatch('finder', home)['model'], 'custom/new-model:xhigh')
+            self.assertEqual(config.dispatch('investigator', home)['model'], 'custom/new-model:xhigh')
+
+    def test_schema3_cutover_uses_fixed_defaults_and_rollback_restores_old_files(self):
+        with tempfile.TemporaryDirectory() as temp, packaged_resources():
+            home = Path(temp)
+            directory = config.agent_dir(home)
+            old_catalog = {
+                "schema_version": 3,
+                "models": {
+                    role: f"legacy/{role}:high"
+                    for role in (*config.REMOVED_ROLE_NAMES, "scout")
+                },
+            }
+            directory.mkdir(parents=True)
+            role_path = directory / "praise.json"
+            role_path.write_text(json.dumps(old_catalog))
+            old_role = directory / "agents/finder.md"
+            old_role.parent.mkdir()
+            old_role.write_text("old finder")
+            result = installation.install(home, overwrite=True)
+            self.assertEqual(config.load_roles(home), config.default_roles())
+            self.assertFalse(old_role.exists())
+            self.assertTrue((directory / "agents/investigator.md").exists())
+            records = json.loads((Path(result["backup"]) / "manifest.json").read_text())
+            self.assertTrue(any(row["path"] == "praise.json" for row in records))
+            self.assertTrue(any(row["path"] == "agents/finder.md" for row in records))
+            installation.rollback(home, Path(result["backup"]))
+            self.assertEqual(json.loads(role_path.read_text()), old_catalog)
+            self.assertEqual(old_role.read_text(), "old finder")
+            self.assertFalse((directory / "agents/investigator.md").exists())
 
     def test_first_install_preserves_existing_role_model_overrides(self):
         with tempfile.TemporaryDirectory() as temp, packaged_resources():
@@ -75,16 +104,23 @@ class InstallTests(unittest.TestCase):
             directory.mkdir(parents=True)
             (directory / "config.yml").write_text(
                 "theme:\n  finder: blue\ntask:\n  agentModelOverrides:\n"
-                "    finder: custom/selected-model:high\n"
-                "    security-reviewer: custom/review-model\n"
+                "    investigator: custom/selected-model:high\n"
+                "    security-reviewer: custom/removed-model\n"
                 "    custom-worker: vendor/unrelated\n"
             )
             installation.install(home, overwrite=True)
-            self.assertEqual(config.dispatch("finder", home)["model"], "custom/selected-model:high")
-            self.assertEqual(config.dispatch("reviewer", home)["model"], "custom/review-model")
+            self.assertEqual(
+                config.dispatch("investigator", home)["model"],
+                "custom/selected-model:high",
+            )
+            self.assertEqual(
+                config.dispatch("analyst", home)["model"],
+                "opencode-go/deepseek-v4.1-flash:high",
+            )
             self.assertEqual(
                 (directory / "config.yml").read_text(),
-                "theme:\n  finder: blue\ntask:\n  agentModelOverrides:\n    custom-worker: vendor/unrelated\n",
+                "theme:\n  finder: blue\ntask:\n  agentModelOverrides:\n"
+                "    custom-worker: vendor/unrelated\n",
             )
 
     def test_conflicts_are_backed_up_and_tombstones_are_reversible(self):
@@ -93,7 +129,9 @@ class InstallTests(unittest.TestCase):
             directory = config.agent_dir(home)
             directory.mkdir(parents=True)
             legacy = directory / 'crew.json'
-            legacy.write_text(json.dumps({'lead_model': 'vendor/lead:xhigh', 'roles': {'finder': {'models': ['vendor/finder:high']}}}))
+            legacy.write_text(json.dumps(
+                {'roles': {'investigator': {'models': ['vendor/investigator:high']}}}
+            ))
             original = legacy.read_bytes()
             obsolete = directory / 'extensions/crew-router.js'
             obsolete.parent.mkdir()
@@ -108,8 +146,7 @@ class InstallTests(unittest.TestCase):
             result = installation.install(home, overwrite=True)
             self.assertFalse(legacy.exists())
             self.assertFalse(obsolete.exists())
-            self.assertEqual(config.dispatch('lead', home)['model'], 'vendor/lead:xhigh')
-            self.assertEqual(config.dispatch('finder', home)['model'], 'vendor/finder:high')
+            self.assertEqual(config.dispatch('investigator', home)['model'], 'vendor/investigator:high')
             records = json.loads((Path(result['backup']) / 'manifest.json').read_text())
             self.assertTrue(any(record['path'] == 'crew.json' and record['installed_sha256'] is None for record in records))
             installation.rollback(home, Path(result['backup']))
@@ -168,9 +205,9 @@ class InstallTests(unittest.TestCase):
             home = Path(temp)
             with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': profile}), patch('praise.installation.Path.home', return_value=home):
                 installation.install()
-                config.set_role_model('lead', 'vendor/profile:high')
+                config.set_role_model('investigator', 'vendor/profile:high')
                 self.assertTrue((Path(profile) / 'extensions/praise-router.js').is_file())
-                self.assertEqual(config.dispatch('lead')['model'], 'vendor/profile:high')
+                self.assertEqual(config.dispatch('investigator')['model'], 'vendor/profile:high')
                 self.assertFalse((home / '.omp/agent/praise.json').exists())
 
     def test_rollback_refuses_another_profile_before_restoring_any_files(self):
